@@ -1,0 +1,9 @@
+# Data paths and Phase 1 configuration.
+#
+# The raw ``.mjai.json`` data is read-only and lives outside this repository.
+# Edit ``raw_dir`` to point at your local dataset.  The same value can be
+# overridden at runtime with the ``--data-dir`` CLI flag or the
+# ``MAHJONG_DATA_DIR`` environment variable.
+
+data:
+  raw_dir: "F:/Mahjong AI/mahjong DB/tenhou-houou-2026"

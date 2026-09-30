@@ -1,0 +1,30 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Processed data (raw data lives outside the repo; see configs/data.yaml)
+data/processed/*
+data/validated/*
+data/raw/*
+!data/raw/.gitkeep
+!data/validated/.gitkeep
+!data/processed/.gitkeep
+
+# IDE
+.idea/
+.vscode/
