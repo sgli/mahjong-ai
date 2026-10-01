@@ -70,10 +70,12 @@ class DatasetBuilder:
             "files_processed": 0,
             "files_error": 0,
             "games": 0,
+            "rounds": 0,
             "samples": 0,
             "samples_skipped": 0,
             "splits": {name: {"games": 0, "samples": 0, "files": 0} for name in SPLIT_NAMES},
         }
+        self._rounds_seen: set[str] = set()
 
     # -- split assignment -------------------------------------------------------
     def assign_splits(self, game_ids: Sequence[str]) -> None:
@@ -103,6 +105,7 @@ class DatasetBuilder:
             raise KeyError(f"game {game_id!r} was not assigned a split (call assign_splits first)")
 
         added = 0
+        round_ids: set[str] = set()
         for sample in samples:
             # Invalid for supervised learning: human action not among the legal
             # actions.  Count and skip (DATA_SPEC section 11 quality check).
@@ -111,12 +114,14 @@ class DatasetBuilder:
                 continue
             self._buffers[split].append(sample_to_row(sample))
             added += 1
+            round_ids.add(sample.round_id)
             if len(self._buffers[split]) >= self.chunk_size:
                 self._flush(split)
 
         if added > 0:
             self._counts["samples"] += added
             self._counts["games"] += 1
+            self._counts["rounds"] += len(round_ids)
             self._counts["splits"][split]["games"] += 1
             self._counts["splits"][split]["samples"] += added
 

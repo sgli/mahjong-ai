@@ -128,7 +128,7 @@ def test_manifest_content(tmp_path):
 
     assert manifest["dataset_version"] == DATASET_VERSION
     assert manifest["action_schema_version"] == "action-v1"
-    assert manifest["feature_version"] == "none"
+    assert manifest["feature_version"] == "feature-v1"
     assert manifest["counts"]["games"] == 3
     assert manifest["counts"]["samples"] == 3
     assert manifest["counts"]["samples_skipped"] == 0

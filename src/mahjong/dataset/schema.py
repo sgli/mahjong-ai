@@ -38,10 +38,10 @@ import pyarrow as pa
 from ..decision.action import Action, ActionType
 from ..decision.decision import DecisionPoint, DecisionSample
 from ..decision.observation import PlayerObservation
+from ..features.action_space import FEATURE_VERSION  # 单一版本来源（feature-v1）
 from ..replay.state import Meld
 
 DATASET_VERSION = "decision-v1"
-FEATURE_VERSION = "none"  # placeholder until Feature Encoder exists
 
 
 def _json(value) -> str:
