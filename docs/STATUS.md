@@ -13,10 +13,11 @@
 - **Phase 7**：Environment（环境/合法动作/结算）
 - **Phase 8**：PPO + Self-play（训练框架骨架）
 - **Phase 9**：Benchmark（对局/评估骨架）
+- **Phase 10**：BC Baseline 训练 + Benchmark（`experiments/exp_0001`，BC vs Random 已跑通）
 
 ## 最新 commit
 
-- `ed9b75b`
+- `42cb626`
 
 ## 版本
 
@@ -24,20 +25,18 @@
 |---|---|
 | 数据版本（dataset_version） | `decision-v1` |
 | feature/action schema 版本 | `feature-v1`（action `action-v1`） |
+| 模型版本 | `bc-v1`（`experiments/exp_0001/checkpoint`） |
 | 数据源 | 天凤/雀魂 `.mjai.json` |
 
 ## 下一阶段目标
 
-- **Phase 10**：训练第一个稳定的 Behavior Cloning（BC）Policy Baseline。
-  - 先做小规模 BC smoke test，验证 loss 下降、checkpoint 保存/加载。
-  - 再跑真实数据 BC 训练，输出 `experiments/` 目录与 metrics。
-  - 最后 Benchmark：BC Policy vs Random Policy vs Rule baseline。
+- 后续优化：在稳定 BC baseline 基础上，可考虑 Rule baseline 对比、更大数据训练；再进入 RL（PPO）阶段（暂缓大规模训练）。
 
 ## 训练前检查状态
 
 - [x] feature version 统一（`feature-v1`）
 - [x] dataset manifest 存在（`data/processed/decision-v1/manifest.json`）
 - [x] dataset validation（见 `docs/DATASET_VALIDATION_REPORT.md`）
-- [ ] BC smoke test
-- [ ] checkpoint 保存/加载
-- [ ] Benchmark 流程
+- [x] BC smoke test
+- [x] checkpoint 保存/加载
+- [x] Benchmark 流程（见 `docs/BENCHMARK_REPORT.md`）

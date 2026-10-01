@@ -4,7 +4,7 @@ games: 10
 rules_games: 2
 seed: 0
 candidate_seat: 0
-candidate_id: ppo
+candidate_id: bc
 baseline_id: random  # null to skip the compare step
 opponent_ids: [random, random, random]  # three fixed opponents for the other seats
 output_dir: experiments/benchmark
@@ -20,4 +20,4 @@ pool:
   bc:
     type: bc
     model_version: bc-v1
-    checkpoint: experiments/bc_baseline/model.pt
+    checkpoint: experiments/exp_0001/checkpoint

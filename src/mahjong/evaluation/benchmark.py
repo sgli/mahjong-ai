@@ -11,22 +11,18 @@ from pathlib import Path
 from ..dataset.manifest import git_commit
 from ..environment import MahjongEnv
 from .opponent import Opponent, RandomOpponent
-from .selfplay import GameResult, run_round
+from .selfplay import GameResult, run_game, run_round
 
 log = logging.getLogger("evaluation.benchmark")
 
 RULES_VERSION = "tenhou-v1"
 
 
-def compute_metrics(results: list[GameResult], seat: int) -> dict:
-    """Compute the 8 benchmark metrics for one seat across games."""
-    n = len(results)
+def _aggregate(ranks: list[int], stats: list[dict], scores: list[int]) -> dict:
+    """Aggregate per-game candidate metrics (counts are per-game, not %)."""
+    n = len(ranks)
     if n == 0:
         return {}
-    ranks = [r.final_ranks[seat] for r in results]
-    stats = [r.stats[seat] for r in results]
-    scores = [r.final_scores[seat] for r in results]
-
     win_count = sum(s["win_count"] for s in stats)
     dealt_in = sum(s["dealt_in_count"] for s in stats)
     riichi = sum(s["riichi_count"] for s in stats)
@@ -36,13 +32,29 @@ def compute_metrics(results: list[GameResult], seat: int) -> dict:
     return {
         "mean_rank": sum(ranks) / n,
         "rank_distribution": [ranks.count(k) for k in range(4)],
-        "win_rate": win_count / n,
-        "deal_in_rate": dealt_in / n,
-        "riichi_rate": riichi / n,
-        "call_rate": call / n,
+        "win_per_game": win_count / n,
+        "deal_in_per_game": dealt_in / n,
+        "riichi_per_game": riichi / n,
+        "call_per_game": call / n,
         "avg_win_points": win_points / win_count if win_count else 0.0,
         "mean_score_change": (sum(scores) / n) - 25000,
     }
+
+
+def compute_metrics(results: list[GameResult], seat: int) -> dict:
+    """Compute the 8 benchmark metrics for one (fixed) seat across games."""
+    ranks = [r.final_ranks[seat] for r in results]
+    stats = [r.stats[seat] for r in results]
+    scores = [r.final_scores[seat] for r in results]
+    return _aggregate(ranks, stats, scores)
+
+
+def compute_rotated_metrics(results: list[GameResult], seats: list[int]) -> dict:
+    """Compute candidate metrics when the candidate seat rotates per game."""
+    ranks = [r.final_ranks[seats[g]] for g, r in enumerate(results)]
+    stats = [r.stats[seats[g]] for g, r in enumerate(results)]
+    scores = [r.final_scores[seats[g]] for g, r in enumerate(results)]
+    return _aggregate(ranks, stats, scores)
 
 
 def _seat_opponents(candidate: Opponent, opponents: list[Opponent], candidate_seat: int) -> list[Opponent]:
@@ -118,16 +130,25 @@ def run_promotion(
     smoke_ok = smoke_test(candidate, seed=seed)
     rules_ok, rules_results = rules_test(candidate, opponents, games=rules_games, seed=seed, candidate_seat=candidate_seat)
 
-    seats = _seat_opponents(candidate, opponents, candidate_seat)
-    results = run_round(seats, games=games, seed=seed)
-    metrics = compute_metrics(results, candidate_seat)
+    def _rotated_round(cand: Opponent) -> tuple[list[GameResult], list[int]]:
+        """Run ``games`` games, rotating the candidate across seats 0..3."""
+        res: list[GameResult] = []
+        seats: list[int] = []
+        for g in range(games):
+            seat = (candidate_seat + g) % 4
+            seat_opponents = _seat_opponents(cand, opponents, seat)
+            res.append(run_game(seat_opponents, seed=seed + g))
+            seats.append(seat)
+        return res, seats
+
+    results, candidate_seats = _rotated_round(candidate)
+    metrics = compute_rotated_metrics(results, candidate_seats)
 
     baseline_metrics = None
     promoted = None
     if baseline is not None:
-        base_seats = _seat_opponents(baseline, opponents, candidate_seat)
-        base_results = run_round(base_seats, games=games, seed=seed)
-        baseline_metrics = compute_metrics(base_results, candidate_seat)
+        base_results, base_seats = _rotated_round(baseline)
+        baseline_metrics = compute_rotated_metrics(base_results, base_seats)
         promoted = metrics["mean_rank"] < baseline_metrics["mean_rank"]  # lower rank is better
 
     timestamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
@@ -135,7 +156,7 @@ def run_promotion(
         candidate_id=candidate.opponent_id,
         candidate_version=candidate.model_version,
         candidate_seat=candidate_seat,
-        opponents={s: f"{o.opponent_id}@{o.model_version}" for s, o in enumerate(seats)},
+        opponents={s: f"{o.opponent_id}@{o.model_version}" for s, o in enumerate(_seat_opponents(candidate, opponents, candidate_seat))},
         games=games,
         seed=seed,
         rules=RULES_VERSION,
@@ -143,12 +164,13 @@ def run_promotion(
         per_game=[
             {
                 "seed": r.seed,
+                "candidate_seat": candidate_seats[g],
                 "final_scores": r.final_scores,
                 "final_ranks": r.final_ranks,
                 "stats": r.stats,
                 "error": r.error,
             }
-            for r in results
+            for g, r in enumerate(results)
         ],
         illegal_rate=sum(r.illegal_actions for r in results) / max(sum(r.steps for r in results), 1),
         smoke_passed=smoke_ok,
