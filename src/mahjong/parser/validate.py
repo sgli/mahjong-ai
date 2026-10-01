@@ -234,6 +234,8 @@ class GameValidator:
 
         elif t is EventType.END_GAME:
             self._end_game_count += 1
+            if self._seen_end_game:
+                self._issue("multiple end_game events", line_no)
             if self._kyoku_open:
                 self._issue("end_game while a kyoku is still open", line_no)
             self._seen_end_game = True

@@ -1,0 +1,29 @@
+# Self-play / opponent-pool configuration (Phase 8).
+
+games: 5
+seed: 0
+max_steps: 100000
+
+# Opponent registry.  ``checkpoint`` may be null (opponent is skipped with a
+# warning if its id is referenced by a match).
+pool:
+  random:
+    type: random
+    model_version: random-v1
+  bc:
+    type: bc
+    model_version: bc-v1
+    checkpoint: experiments/bc_baseline/model.pt
+  ppo:
+    type: policy
+    model_version: ppo-v1
+    checkpoint: experiments/ppo_baseline/model.pt
+
+# Each match maps four seats (0..3) to pool opponent ids.
+matches:
+  - name: all_random
+    seats: [random, random, random, random]
+  - name: ppo_vs_random
+    seats: [ppo, random, random, random]
+  - name: current_vs_history
+    seats: [ppo, bc, random, random]

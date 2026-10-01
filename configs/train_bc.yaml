@@ -1,0 +1,21 @@
+# Behavior Cloning training configuration (Phase 5 baseline).
+# All paths/sizes are configurable; nothing here is hard-coded in code.
+
+dataset_dir: "data/processed/decision-v1"
+checkpoint_dir: "experiments/bc_baseline"
+
+dataset_version: "decision-v1"
+feature_version: "feature-v1"
+action_schema_version: "action-v1"
+environment_version: "none"
+
+model:
+  hidden_sizes: [256, 256]
+
+training:
+  batch_size: 512
+  epochs: 3
+  lr: 0.001
+  seed: 0
+  log_interval_steps: 50
+  device: "cpu"

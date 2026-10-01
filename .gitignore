@@ -25,6 +25,11 @@ data/raw/*
 !data/validated/.gitkeep
 !data/processed/.gitkeep
 
+# Experiment artifacts (checkpoints / results are regenerable)
+experiments/
+*.pt
+*.parquet
+
 # IDE
 .idea/
 .vscode/

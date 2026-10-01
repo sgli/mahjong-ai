@@ -1,0 +1,32 @@
+# PPO training configuration (Phase 7 baseline, CPU small scale).
+
+checkpoint_dir: "experiments/ppo_baseline"
+bc_checkpoint: null  # optional path to a BC model.pt to initialise trunk/action head
+
+model:
+  hidden_sizes: [128, 128]
+
+training:
+  num_envs: 2
+  env_seed: 0
+  epochs: 3
+  steps_per_epoch: 400
+  batch_size: 64
+  update_epochs: 4
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  lr: 0.0005
+  seed: 0
+  log_interval_epochs: 1
+  device: "cpu"
+  max_episode_steps: 5000
+
+eval_games: 5
+
+dataset_version: "decision-v1"
+feature_version: "feature-v1"
+action_schema_version: "action-v1"
+environment_version: "none"

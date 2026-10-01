@@ -1,0 +1,23 @@
+# Benchmark configuration (Phase 9).
+
+games: 10
+rules_games: 2
+seed: 0
+candidate_seat: 0
+candidate_id: ppo
+baseline_id: random  # null to skip the compare step
+opponent_ids: [random, random, random]  # three fixed opponents for the other seats
+output_dir: experiments/benchmark
+
+pool:
+  random:
+    type: random
+    model_version: random-v1
+  ppo:
+    type: policy
+    model_version: ppo-v1
+    checkpoint: experiments/ppo_baseline/model.pt
+  bc:
+    type: bc
+    model_version: bc-v1
+    checkpoint: experiments/bc_baseline/model.pt

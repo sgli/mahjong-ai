@@ -116,6 +116,17 @@ def test_game_validator_kyoku_balance():
     assert any("final kyoku is not ended" in i.message for i in v.issues)
 
 
+def test_game_validator_duplicate_end_game():
+    v = GameValidator()
+    v.add(StartGame(names=("a", "b", "c", "d"), kyoku_first=0, aka_flag=True), 1)
+    v.add(StartKyoku("E", "W", 1, 0, 0, 0, (25000, 25000, 25000, 25000), _valid_kyoku_hand()), 2)
+    v.add(EndKyoku(), 3)
+    v.add(EndGame(), 4)
+    v.add(EndGame(), 5)
+    v.finish()
+    assert any("multiple end_game" in i.message for i in v.issues)
+
+
 def test_game_validator_event_after_end_game():
     v = GameValidator()
     v.add(StartGame(names=("a", "b", "c", "d"), kyoku_first=0, aka_flag=True), 1)

@@ -11,6 +11,9 @@ import pytest
 
 from mahjong.parser import MjaiParser
 
+# Test convenience only: ``MAHJONG_TEST_DATA_DIR`` always takes priority so the
+# test works on any machine; the hard-coded path below is just a fallback for
+# the author's checkout and is never used when the environment variable is set.
 DEFAULT_DATA_DIR = Path("F:/Mahjong AI/mahjong DB/tenhou-houou-2026")
 
 
