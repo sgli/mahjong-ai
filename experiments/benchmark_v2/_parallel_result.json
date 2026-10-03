@@ -1,0 +1,48 @@
+{
+  "seed": 42,
+  "num_workers": 16,
+  "candidate": "bc_v2@bc-v2",
+  "vs_random": {
+    "metrics": {
+      "mean_rank": 0.012,
+      "rank_distribution": [
+        4959,
+        28,
+        7,
+        6
+      ],
+      "win_per_game": 2.6228,
+      "deal_in_per_game": 0.011,
+      "riichi_per_game": 1.638,
+      "call_per_game": 8.7698,
+      "avg_win_points": 8535.526917797773,
+      "mean_score_change": 26606.300000000003,
+      "illegal_rate": 0.0,
+      "games": 5000
+    },
+    "games": 5000,
+    "elapsed_s": 377.8
+  },
+  "vs_bc1": {
+    "metrics": {
+      "mean_rank": 0.4552,
+      "rank_distribution": [
+        3487,
+        960,
+        343,
+        210
+      ],
+      "win_per_game": 2.3726,
+      "deal_in_per_game": 0.2966,
+      "riichi_per_game": 1.8092,
+      "call_per_game": 8.142,
+      "avg_win_points": 8753.746944280536,
+      "mean_score_change": 19363.18,
+      "illegal_rate": 0.0,
+      "games": 5000
+    },
+    "games": 5000,
+    "elapsed_s": 1074.4
+  },
+  "total_elapsed_s": 1452.2
+}

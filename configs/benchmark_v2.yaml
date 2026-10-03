@@ -1,0 +1,25 @@
+# Benchmark config for BC v2 large-scale evaluation (Phase 10.1).
+# 对手：random / bc-v1（exp_0001 checkpoint）/ baseline。
+# candidate 每局轮换座位；指标单位为「次/局」。
+
+games: 10000
+rules_games: 4
+seed: 42
+candidate_seat: 0
+candidate_id: bc
+baseline_id: random  # null to skip the compare step
+opponent_ids: [random, random, random]  # three fixed opponents for the other seats
+output_dir: experiments/benchmark_v2
+
+pool:
+  random:
+    type: random
+    model_version: random-v1
+  bc:
+    type: bc
+    model_version: bc-v2
+    checkpoint: experiments/bc_v2/checkpoints
+  bc_v1:
+    type: bc
+    model_version: bc-v1
+    checkpoint: experiments/exp_0001/checkpoint

@@ -49,6 +49,8 @@ class DatasetBuilder:
         source_dir: str | Path | None = None,
         limit: int = 0,
         git_commit_hash: str | None = None,
+        progress_interval: int = 0,
+        processed_games: set[str] | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.chunk_size = chunk_size
@@ -60,6 +62,9 @@ class DatasetBuilder:
         self.source_dir = source_dir
         self.limit = limit
         self.git_commit_hash = git_commit_hash
+        self.progress_interval = progress_interval
+        self.processed_games = set(processed_games or ())
+        self.new_processed_games: set[str] = set()
 
         self._split_assignment: dict[str, str] = {}
         self._buffers = {name: [] for name in SPLIT_NAMES}
@@ -134,8 +139,22 @@ class DatasetBuilder:
         self._counts["files_requested"] = len(paths)
 
         parser = MjaiParser()
-        for path in paths:
+        for idx, path in enumerate(paths, 1):
             game_id = path.stem
+            if game_id in self.processed_games:
+                continue  # 断点续传：跳过已完成的 game
+
+            if self.progress_interval and idx % self.progress_interval == 0:
+                log.info(
+                    "progress %d/%d files (processed %d, games %d, samples %d, skipped %d)",
+                    idx,
+                    len(paths),
+                    self._counts["files_processed"],
+                    self._counts["games"],
+                    self._counts["samples"],
+                    self._counts["samples_skipped"],
+                )
+
             events = []
             try:
                 for line_no, line in enumerate(Path(path).open("r", encoding="utf-8"), 1):
@@ -164,6 +183,7 @@ class DatasetBuilder:
 
             self.add_game_samples(game_id, samples)
             self._counts["files_processed"] += 1
+            self.new_processed_games.add(game_id)
 
         return self.finish()
 

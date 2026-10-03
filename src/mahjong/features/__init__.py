@@ -8,7 +8,6 @@ from .action_space import (
     canonical_action,
     legal_mask,
 )
-from .encoder import FEATURE_DIM, ObservationEncoder, encode_observation
 
 __all__ = [
     "ACTION_SPACE_SIZE",
@@ -21,3 +20,13 @@ __all__ = [
     "encode_observation",
     "legal_mask",
 ]
+
+
+def __getattr__(name):
+    # Lazy import of the torch-dependent encoder, so the dataset/parser path
+    # (which only needs FEATURE_VERSION) does not pull in torch.
+    if name in ("FEATURE_DIM", "ObservationEncoder", "encode_observation"):
+        from . import encoder
+
+        return getattr(encoder, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

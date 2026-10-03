@@ -33,8 +33,6 @@ Space layout (``ACTION_SPACE_SIZE = 270``)::
 
 from __future__ import annotations
 
-import torch
-
 from ..decision.action import Action, ActionType
 from ..rules.tiles import ALL_TILES, TILE_TO_INDEX, normalize
 
@@ -144,8 +142,10 @@ def canonical_action(action: Action) -> Action:
     return action_from_id(action_to_id(action))
 
 
-def legal_mask(legal_actions) -> torch.Tensor:
+def legal_mask(legal_actions) -> "torch.Tensor":
     """Boolean mask of shape ``[ACTION_SPACE_SIZE]`` with True for legal ids."""
+    import torch  # lazy import: keeps dataset/parser path torch-free
+
     mask = torch.zeros(ACTION_SPACE_SIZE, dtype=torch.bool)
     for action in legal_actions:
         mask[action_to_id(action)] = True

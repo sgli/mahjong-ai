@@ -29,7 +29,7 @@ import yaml  # noqa: E402
 from mahjong.dataset.manifest import git_commit  # noqa: E402
 from mahjong.features import ACTION_SPACE_SIZE, FEATURE_DIM, ObservationEncoder  # noqa: E402
 from mahjong.model import MLPPolicy  # noqa: E402
-from mahjong.training import save_checkpoint, train  # noqa: E402
+from mahjong.training import save_checkpoint, train, train_dataloader  # noqa: E402
 
 log = logging.getLogger("train_bc")
 
@@ -45,6 +45,12 @@ def _load_config(path: Path) -> dict:
 def _seed_everything(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
+
+
+def _resolve_device(spec: str) -> torch.device:
+    if spec == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(spec)
 
 
 def _parquet_files(dataset_dir: Path, split: str) -> list[Path]:
@@ -64,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, help="override seed")
     ap.add_argument("--batch-size", type=int, help="override batch size")
     ap.add_argument("--device", help="override device (cpu/cuda)")
+    ap.add_argument("--num-workers", type=int, help="override DataLoader num_workers")
+    ap.add_argument("--prefetch-factor", type=int, help="override DataLoader prefetch_factor")
     args = ap.parse_args(argv)
 
     cfg = _load_config(Path(args.config))
@@ -77,7 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     lr = args.lr if args.lr is not None else train_cfg.get("lr", 0.001)
     seed = args.seed if args.seed is not None else train_cfg.get("seed", 0)
     batch_size = args.batch_size if args.batch_size is not None else train_cfg.get("batch_size", 512)
-    device = torch.device(args.device or train_cfg.get("device", "cpu"))
+    device_str = args.device or train_cfg.get("device", "auto")
+    device = _resolve_device(device_str)
+    use_amp = train_cfg.get("use_amp", False) and device.type == "cuda"
+    pin_memory = train_cfg.get("pin_memory", False)
+    num_workers = args.num_workers if args.num_workers is not None else train_cfg.get("num_workers", 0)
+    prefetch_factor = args.prefetch_factor if args.prefetch_factor is not None else train_cfg.get("prefetch_factor", 4)
     log_interval = train_cfg.get("log_interval_steps", 50)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
@@ -92,9 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     encoder = ObservationEncoder()
     model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden_sizes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if device.type == "cuda":
+        log.info("CUDA device: %s", torch.cuda.get_device_name(0))
 
     started = time.perf_counter()
-    history = train(
+    history = train_dataloader(
         model,
         optimizer,
         train_files,
@@ -103,7 +118,10 @@ def main(argv: list[str] | None = None) -> int:
         epochs=epochs,
         batch_size=batch_size,
         device=device,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
         log_interval_steps=log_interval,
+        use_amp=use_amp,
     )
     elapsed = time.perf_counter() - started
 
@@ -116,6 +134,15 @@ def main(argv: list[str] | None = None) -> int:
         "action_space_size": ACTION_SPACE_SIZE,
         "training": {"epochs": epochs, "lr": lr, "batch_size": batch_size, "seed": seed},
         "dataset_dir": str(dataset_dir),
+        "dataset_version": cfg.get("dataset_version", "decision-v1"),
+        "feature_version": cfg.get("feature_version", "feature-v1"),
+        "model_version": cfg.get("model_version", "bc-v1"),
+        "device": str(device),
+        "use_amp": use_amp,
+        "num_workers": num_workers,
+        "prefetch_factor": prefetch_factor,
+        "pin_memory": pin_memory,
+        "gpu_name": torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu",
     }
     metrics = {
         "train": final_train,

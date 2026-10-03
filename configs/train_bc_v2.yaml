@@ -1,0 +1,26 @@
+# Large-scale Behavior Cloning training config (Phase 10.1, decision-v2).
+# 模型保持当前 MLP 架构不变；只改数据/训练/输出路径。
+
+dataset_dir: "data/processed/decision-v2"
+checkpoint_dir: "experiments/bc_v2/checkpoints"
+
+dataset_version: "decision-v2"
+feature_version: "feature-v1"
+action_schema_version: "action-v1"
+environment_version: "none"
+model_version: "bc-v2"
+
+model:
+  hidden_sizes: [256, 256]
+
+training:
+  batch_size: 512
+  epochs: 5
+  lr: 0.001
+  seed: 42
+  log_interval_steps: 50
+  device: "auto"        # auto/cuda/cpu：auto 有 cuda 用 cuda
+  use_amp: true         # cuda 上 bf16 autocast（不稳定可设 false 退回 fp32）
+  pin_memory: true      # cuda 上锁页内存 + 非阻塞拷贝
+  num_workers: 16       # DataLoader 并行加载 worker 数
+  prefetch_factor: 4    # 每 worker 预取 batch 数
