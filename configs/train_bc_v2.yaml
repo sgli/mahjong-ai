@@ -24,3 +24,10 @@ training:
   pin_memory: true      # cuda 上锁页内存 + 非阻塞拷贝
   num_workers: 16       # DataLoader 并行加载 worker 数
   prefetch_factor: 4    # 每 worker 预取 batch 数
+  shuffle_seed: 42      # §12：每 epoch shard 顺序 = f(seed+epoch)（同 seed 同 epoch 可复现）
+  limit_train_shards: 0 # §15：>0 时只用前 N 个 train shard（小规模收敛实验，需批准）
+
+validation:             # §13：快速采样验证
+  mode: "sampled"       # sampled | full（full 需 captain 批准）
+  samples: 5000000      # 每 epoch 采样样本数（mode=sampled 时生效）
+

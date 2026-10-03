@@ -3,10 +3,26 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import torch
 import yaml
+
+_TRAINING_STATE_KEYS = (
+    "state_dict",
+    "optimizer_state_dict",
+    "epoch",
+    "global_step",
+    "best_val_loss",
+    "best_val_accuracy",
+    "config",
+    "metrics",
+    "rng_state",
+    "rng_state_torch_cpu",
+    "rng_state_torch_cuda",
+    "scaler_state",
+)
 
 
 def save_checkpoint(
@@ -55,3 +71,85 @@ def save_checkpoint(
 def load_checkpoint(checkpoint_dir: str | Path, map_location: str = "cpu") -> dict:
     """Load the ``model.pt`` dict (state_dict / config / metrics / step)."""
     return torch.load(Path(checkpoint_dir) / "model.pt", map_location=map_location)
+
+
+def capture_rng_states() -> dict:
+    """Capture Python + Torch CPU/CUDA RNG states for deterministic resume."""
+    states = {
+        "rng_state": random.getstate(),
+        "rng_state_torch_cpu": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        states["rng_state_torch_cuda"] = torch.cuda.get_rng_state_all()
+    return states
+
+
+def restore_rng_states(states: dict) -> None:
+    """Restore RNG states captured by :func:`capture_rng_states` (best effort)."""
+    if "rng_state" in states and states["rng_state"] is not None:
+        random.setstate(states["rng_state"])
+    if "rng_state_torch_cpu" in states and states["rng_state_torch_cpu"] is not None:
+        cpu_state = states["rng_state_torch_cpu"]
+        if hasattr(cpu_state, "cpu"):
+            cpu_state = cpu_state.cpu()
+        torch.set_rng_state(cpu_state)
+    if (
+        torch.cuda.is_available()
+        and "rng_state_torch_cuda" in states
+        and states["rng_state_torch_cuda"] is not None
+    ):
+        cuda_states = states["rng_state_torch_cuda"]
+        try:
+            torch.cuda.set_rng_state_all(cuda_states)
+        except (TypeError, RuntimeError):
+            # 从 CPU 加载时张量在 CPU，搬回 CUDA 再设置
+            torch.cuda.set_rng_state_all([s.cuda() if hasattr(s, "cuda") else s for s in cuda_states])
+
+
+def save_training_checkpoint(
+    path: str | Path,
+    *,
+    model_state_dict: dict,
+    optimizer_state_dict: dict | None,
+    epoch: int,
+    global_step: int,
+    best_val_loss: float,
+    best_val_accuracy: float,
+    config: dict,
+    metrics: dict,
+    scaler_state: dict | None = None,
+    rng_states: dict | None = None,
+) -> Path:
+    """Save the full training state (resume-capable)."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "state_dict": model_state_dict,
+        "optimizer_state_dict": optimizer_state_dict,
+        "epoch": epoch,
+        "global_step": global_step,
+        "best_val_loss": best_val_loss,
+        "best_val_accuracy": best_val_accuracy,
+        "config": config,
+        "metrics": metrics,
+        "rng_state": (rng_states or {}).get("rng_state"),
+        "rng_state_torch_cpu": (rng_states or {}).get("rng_state_torch_cpu"),
+        "rng_state_torch_cuda": (rng_states or {}).get("rng_state_torch_cuda"),
+        "scaler_state": scaler_state,
+    }
+    torch.save(payload, p)
+    return p
+
+
+def load_training_checkpoint(path: str | Path, map_location: str = "cpu") -> dict:
+    """Load a training checkpoint; missing (legacy) fields default to ``None``."""
+    payload = torch.load(Path(path), map_location=map_location)
+    if not isinstance(payload, dict):
+        raise TypeError(f"training checkpoint must be a dict, got {type(payload)}")
+    # backward-compat: legacy checkpoints only had state_dict/config/metrics/training_step
+    if "epoch" not in payload and "training_step" in payload:
+        payload.setdefault("epoch", 0)
+        payload.setdefault("global_step", payload["training_step"])
+    for key in _TRAINING_STATE_KEYS:
+        payload.setdefault(key, None)
+    return payload

@@ -1,0 +1,34 @@
+# Phase 10.1.1 全量 5 epoch BC 训练（bc-v2.1）
+# - 全量 decision-v2（limit_train_shards=0），batch 2048（sweep 最优），16 worker，bf16
+# - 每 epoch 保存 epoch_N.pt，训练中按 sampled 5M 验证；结束后用 scripts/evaluate_bc.py 做完整 val/test
+# - checkpoint 命名 bc-v2.1（保留 bc-v2 便于对比）
+
+dataset_dir: "data/processed/decision-v2"
+checkpoint_dir: "experiments/bc_v2.1/checkpoints"
+
+dataset_version: "decision-v2"
+feature_version: "feature-v1"
+action_schema_version: "action-v1"
+environment_version: "none"
+model_version: "bc-v2.1"
+
+model:
+  hidden_sizes: [256, 256]
+
+training:
+  batch_size: 2048
+  epochs: 5
+  lr: 0.001
+  seed: 42
+  log_interval_steps: 1000
+  device: "auto"
+  use_amp: true
+  pin_memory: true
+  num_workers: 16
+  prefetch_factor: 4
+  shuffle_seed: 42          # §12：每 epoch shard 顺序 = f(seed + epoch)
+  limit_train_shards: 0     # 0 = 全量
+
+validation:                 # §13：训练中按 sampled 快速验证（完整评估在训练后用 evaluate_bc.py）
+  mode: "sampled"
+  samples: 5000000

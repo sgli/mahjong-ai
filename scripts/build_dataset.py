@@ -11,6 +11,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -90,7 +91,23 @@ def _process_chunk(task: tuple) -> dict:
     buffers: dict[str, list] = {"train": [], "validation": [], "test": []}
     seq = 0
     processed: list[str] = []
-    errors: list[str] = []
+    errors: list[dict] = []
+    error_path = out / f"_errors_{worker_id}.jsonl"
+    error_handle = error_path.open("a", encoding="utf-8")  # 流式追加，不累积
+
+    def record_error(game_id: str, file: str, error_type: str, event_type, step, message: str) -> None:
+        entry = {
+            "game_id": game_id,
+            "file": file,
+            "error_type": error_type,
+            "event_type": event_type,
+            "step": step,
+            "message": message,
+        }
+        errors.append(entry)
+        error_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        error_handle.flush()
+
     stats = {
         "files": 0,
         "games": 0,
@@ -124,21 +141,23 @@ def _process_chunk(task: tuple) -> dict:
                 events.append(parser.parse_line(line, line_no))
         except Exception as exc:  # parse error
             stats["files_error"] += 1
-            errors.append(f"{path.name}: parse: {exc}")
+            record_error(game_id, path.name, "parse", None, None, str(exc))
             continue
 
         try:
             states = list(ReplayEngine(game_id=game_id).replay(events))
         except Exception as exc:
             stats["files_error"] += 1
-            errors.append(f"{path.name}: replay: {exc}")
+            event_type = getattr(exc, "event_type", None)
+            step = getattr(exc, "step", None)
+            record_error(game_id, path.name, "replay", event_type, step, str(exc))
             continue
 
         try:
             samples = list(DecisionExtractor(game_id=game_id).extract(states, events))
         except Exception as exc:
             stats["files_error"] += 1
-            errors.append(f"{path.name}: extract: {type(exc).__name__}: {exc}")
+            record_error(game_id, path.name, "extract", None, None, f"{type(exc).__name__}: {exc}")
             continue
 
         added = 0
@@ -170,6 +189,7 @@ def _process_chunk(task: tuple) -> dict:
     (out / f"_processed_{worker_id}.txt").write_text(
         "\n".join(processed) + ("\n" if processed else ""), encoding="utf-8"
     )
+    error_handle.close()
     stats["errors"] = errors
     return stats
 
@@ -243,6 +263,12 @@ def _parallel_build(
             merged["splits"][s]["samples"] += st["splits"][s]["samples"]
             merged["splits"][s]["files"] += st["splits"][s]["files"]
         errors.extend(st.get("errors", []))
+
+    # 合并各 worker 的错误 jsonl → dataset_errors.jsonl（流式追加，不累积）
+    err_out = output_dir / "dataset_errors.jsonl"
+    with err_out.open("w", encoding="utf-8") as out_h:
+        for f in sorted(output_dir.glob("_errors_*.jsonl")):
+            out_h.write(f.read_text(encoding="utf-8"))
 
     # 续传状态：合并各 worker 的已完成 game 写入统一状态文件
     all_processed = sorted(processed_games)

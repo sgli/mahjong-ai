@@ -9,16 +9,18 @@ string); an opponent must return one of those elements.
 from __future__ import annotations
 
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 
-from ..decision.action import Action
+from ..decision.action import Action, ActionType
 from ..features import ACTION_SPACE_SIZE, FEATURE_DIM
 from ..features.action_space import action_to_id, legal_mask
 from ..features.encoder import ObservationEncoder
 from ..model.policy import MLPPolicy, remap_bc_state_dict
+from ..rules.tiles import HONORS, normalize
 from ..training.checkpoint import load_checkpoint
 
 
@@ -59,7 +61,11 @@ class RandomOpponent(Opponent):
 
 
 class PolicyOpponent(Opponent):
-    """Samples from a policy (with legal mask); never samples an illegal action."""
+    """Policy opponent with configurable decision mode (§17).
+
+    ``mode="sampling"`` (default): ``torch.multinomial`` (stochastic, rng-seeded).
+    ``mode="greedy"``: ``argmax`` over legal logits (deterministic, ignores rng).
+    """
 
     def __init__(
         self,
@@ -70,6 +76,7 @@ class PolicyOpponent(Opponent):
         checkpoint: str | Path,
         config: dict | None = None,
         device: str | torch.device = "cpu",
+        mode: str = "sampling",
     ):
         super().__init__(
             opponent_id=opponent_id,
@@ -78,7 +85,10 @@ class PolicyOpponent(Opponent):
             checkpoint=str(checkpoint),
             config=config or {},
         )
+        if mode not in ("greedy", "sampling"):
+            raise ValueError(f"mode must be greedy|sampling, got {mode!r}")
         self.device = torch.device(device)
+        self.mode = mode
         self.encoder, self.model = load_policy(checkpoint, self.device)
 
     def decide(self, observation, legal_actions: list, rng: random.Random):
@@ -89,11 +99,67 @@ class PolicyOpponent(Opponent):
         mask = legal_mask(actions).to(self.device).unsqueeze(0)
         with torch.no_grad():
             out = self.model(features, mask)
-            probs = torch.softmax(out.logits, dim=-1)
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(rng.randrange(1 << 31))
-            action_id = int(torch.multinomial(probs, 1, generator=generator).squeeze(-1).item())
+            if self.mode == "greedy":
+                action_id = int(out.logits.argmax(dim=-1).item())
+            else:
+                probs = torch.softmax(out.logits, dim=-1)
+                generator = torch.Generator(device="cpu")
+                generator.manual_seed(rng.randrange(1 << 31))
+                action_id = int(torch.multinomial(probs, 1, generator=generator).squeeze(-1).item())
         return next(a for a in actions if action_to_id(a) == action_id)
 
 
-__all__ = ["Opponent", "PolicyOpponent", "RandomOpponent", "load_policy"]
+class RuleOpponent(Opponent):
+    """Simple explainable heuristic baseline (§18).
+
+    Decision rules (in priority order):
+      1. TSUMO / RON → take the win.
+      2. RIICHI → declare (riichi is only legal when tenpai).
+      3. PASS → pass (never call pon/chi/daiminkan).
+      4. KAN ankan → take (closed kan); other KAN → pass.
+      5. DISCARD → discard the least useful tile (isolated terminal/honour first).
+    """
+
+    def __init__(self, opponent_id: str = "rule", model_version: str = "rule-v1"):
+        super().__init__(opponent_id=opponent_id, type="rule", model_version=model_version)
+
+    @staticmethod
+    def _keep_value(tile: str, hand_counts: Counter) -> float:
+        t = normalize(tile)
+        v = 0.0
+        if hand_counts[t] >= 2:
+            v += 2.0  # keep pairs/triplets
+        if t in HONORS:
+            v += 0.2  # honours mostly useless unless yakuhai
+        elif t[0] in "19":
+            v += 0.5  # terminals
+        else:
+            v += 1.0  # middle tiles form sequences
+        return v
+
+    def decide(self, observation, legal_actions: list, rng: random.Random):
+        actions = [a for a in legal_actions if isinstance(a, Action)]
+        if not actions:
+            return legal_actions[0]
+
+        for a in actions:
+            if a.type in (ActionType.TSUMO, ActionType.RON):
+                return a
+        for a in actions:
+            if a.type is ActionType.RIICHI:
+                return a
+        for a in actions:
+            if a.type is ActionType.PASS:
+                return a
+        for a in actions:
+            if a.type is ActionType.KAN and a.kan_kind == "ankan":
+                return a
+
+        discards = [a for a in actions if a.type is ActionType.DISCARD]
+        if discards:
+            hand_counts = Counter(normalize(t) for t in observation.hand)
+            return min(discards, key=lambda a: self._keep_value(a.tile, hand_counts))
+        return actions[0]
+
+
+__all__ = ["Opponent", "PolicyOpponent", "RandomOpponent", "RuleOpponent", "load_policy"]

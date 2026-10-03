@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .opponent import Opponent, PolicyOpponent, RandomOpponent
+from .opponent import Opponent, PolicyOpponent, RandomOpponent, RuleOpponent
 
 
 class OpponentPool:
@@ -43,6 +43,7 @@ def default_pool(device: str | None = None) -> OpponentPool:
     """A baseline pool: random + (if checkpoints exist) BC and current PPO."""
     pool = OpponentPool()
     pool.add(RandomOpponent(opponent_id="random", model_version="random-v1"))
+    pool.add(RuleOpponent(opponent_id="rule", model_version="rule-v1"))
     # These are optional conveniences; callers add their own checkpoints.
     return pool
 

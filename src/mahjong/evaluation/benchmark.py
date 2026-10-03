@@ -57,6 +57,18 @@ def compute_rotated_metrics(results: list[GameResult], seats: list[int]) -> dict
     return _aggregate(ranks, stats, scores)
 
 
+def compute_opponents_metrics(results: list[GameResult], candidate_seats: list[int]) -> dict:
+    """Aggregate the 3 opponent seats (all non-candidate seats) across games (§19)."""
+    ranks, stats, scores = [], [], []
+    for g, r in enumerate(results):
+        for seat in range(4):
+            if seat != candidate_seats[g]:
+                ranks.append(r.final_ranks[seat])
+                stats.append(r.stats[seat])
+                scores.append(r.final_scores[seat])
+    return _aggregate(ranks, stats, scores)
+
+
 def _seat_opponents(candidate: Opponent, opponents: list[Opponent], candidate_seat: int) -> list[Opponent]:
     assert len(opponents) == 3
     seats: list[Opponent | None] = [None, None, None, None]
@@ -111,6 +123,7 @@ class PromotionResult:
     rules_passed: bool
     promoted: bool | None
     baseline_metrics: dict | None
+    opponents_metrics: dict | None
     timestamp: str
     git_commit: str
 
@@ -143,6 +156,7 @@ def run_promotion(
 
     results, candidate_seats = _rotated_round(candidate)
     metrics = compute_rotated_metrics(results, candidate_seats)
+    opponents_metrics = compute_opponents_metrics(results, candidate_seats)
 
     baseline_metrics = None
     promoted = None
@@ -177,6 +191,7 @@ def run_promotion(
         rules_passed=rules_ok,
         promoted=promoted,
         baseline_metrics=baseline_metrics,
+        opponents_metrics=opponents_metrics,
         timestamp=timestamp,
         git_commit=git_commit(Path.cwd()),
     )

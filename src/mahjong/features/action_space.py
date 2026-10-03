@@ -107,6 +107,42 @@ def action_to_id(action: Action) -> int:
     raise ValueError(f"unsupported action type {t!r}")
 
 
+def action_dict_to_id(d: dict) -> int:
+    """Map a plain action dict (as stored in ``legal_actions`` JSON) to its id.
+
+    Mirrors :func:`action_to_id` exactly (no ``Action`` object construction).
+    """
+    t = d["type"]
+    tile = d.get("tile")
+    consumed = tuple(d.get("consumed") or [])
+    kan_kind = d.get("kan_kind")
+    if t == "discard":
+        return _OFFSET_DISCARD + TILE_TO_INDEX[normalize(tile)]
+    if t == "riichi":
+        return _OFFSET_RIICHI + TILE_TO_INDEX[normalize(tile)]
+    if t == "tsumo":
+        return _OFFSET_TSUMO
+    if t == "pass":
+        return _OFFSET_PASS
+    if t == "ron":
+        return _OFFSET_RON
+    if t == "pon":
+        return _OFFSET_PON + TILE_TO_INDEX[normalize(tile)]
+    if t == "chi":
+        tile_n = normalize(tile)
+        consumed_n = tuple(sorted(normalize(x) for x in consumed))
+        return _OFFSET_CHI + _CHI_INDEX[(tile_n, consumed_n)]
+    if t == "kan":
+        if kan_kind == "ankan":
+            return _OFFSET_ANKAN + TILE_TO_INDEX[normalize(consumed[0])]
+        if kan_kind == "daiminkan":
+            return _OFFSET_DAIMINKAN + TILE_TO_INDEX[normalize(tile)]
+        if kan_kind == "kakan":
+            return _OFFSET_KAKAN + TILE_TO_INDEX[normalize(tile)]
+        raise ValueError(f"invalid kan_kind {kan_kind!r}")
+    raise ValueError(f"unsupported action type {t!r}")
+
+
 def action_from_id(action_id: int) -> Action:
     """Inverse of :func:`action_to_id` (returns the canonical Action, target=None)."""
     if not 0 <= action_id < ACTION_SPACE_SIZE:
