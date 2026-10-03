@@ -21,8 +21,8 @@
 
 ## 最新 commit
 
+- `80fa706`（Phase 10.1：decision-v2 + bc-v2 + 10000 局 Benchmark）
 - `2b2092b`（Phase 10 核查修复）
-- Phase 10.1（decision-v2 / bc-v2 / benchmark）见 git log 最新提交
 
 ## 版本
 
