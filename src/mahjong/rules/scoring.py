@@ -172,6 +172,19 @@ def _round100(points: int) -> int:
     return ((points + 99) // 100) * 100
 
 
+def _kokushi_13sided(hand, win_tile: str) -> bool:
+    """国士無双十三面待ち：去掉和牌张后仍为 13 种不同的幺九牌。"""
+    from ..rules.tiles import normalize
+
+    pre = [normalize(t) for t in hand]
+    w = normalize(win_tile)
+    for i, t in enumerate(pre):
+        if t == w:
+            pre.pop(i)
+            break
+    return len(set(pre)) == 13
+
+
 def ron_payment(base_points: int, is_dealer: bool) -> int:
     """Amount the discarder pays on a ron (rounded up to 100)."""
     return _round100(base_points * (6 if is_dealer else 4))
@@ -196,6 +209,7 @@ def score_hand(
     dora_indicators=(),
     ura_indicators=(),
     kiriage_mangan: bool = False,
+    double_yakuman: bool = False,
 ) -> ScoreResult:
     """Score a winning hand.  ``hand`` is the concealed hand including the win tile.
 
@@ -210,6 +224,8 @@ def score_hand(
     # kokushi (thirteen orphans) — yakuman
     if len(melds) == 0 and is_kokushi(hand):
         yakuman = ["kokushi_musou"]
+        if double_yakuman and _kokushi_13sided(hand, win_tile):
+            yakuman = ["kokushi_musou", "kokushi_musou"]  # 国士無双十三面：双倍
         if context.is_tenhou:
             yakuman.append("tenhou")
         if context.is_chiihou:
@@ -245,7 +261,7 @@ def score_hand(
         for structure in iter_structures(hand, melds):
             # 高点法：番数与符数来自同一分解、同一和牌张归属；枚举每种听牌形解释
             for wt in _wait_types(structure, win_tile):
-                yr = compute_yaku(structure, context, wait_type=wt)
+                yr = compute_yaku(structure, context, wait_type=wt, double_yakuman=double_yakuman)
                 fu = _compute_fu(structure, context, wait_type=wt)
                 if yr.yakuman:
                     candidates.append(

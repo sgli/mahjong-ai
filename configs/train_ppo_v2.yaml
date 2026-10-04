@@ -1,0 +1,51 @@
+# PPO v2 起点配置（Phase 10.3 §25）。这些是起点、非最优；不得据此自动大规模 sweep。
+
+checkpoint_dir: "experiments/ppo_v2"
+bc_checkpoint: "experiments/bc_v2.1/checkpoints/best.pt"
+
+dataset_version: "decision-v2"
+feature_version: "feature-v1"
+action_schema_version: "action-v1"
+environment_version: "tenhou-v2-rl"
+reward_version: "reward-v1"
+model_version: "ppo-v2"
+
+# §22 / §23 实验追踪字段
+opponent_pool_version: "pool-v1"
+rollout_version: "rollout-v1"
+training_stage: "pilot"
+opponent_pool_config:
+  random-v1: 0.10
+  rule-v1: 0.20
+  bc-v2.1: 0.30
+  ppo-v1: 0.20
+  historical: 0.20
+
+model:
+  hidden_sizes: [256, 256]
+
+training:
+  seed: 42
+  env_seed: 42
+  device: "cuda"
+
+  num_envs: 16
+  epochs: 5
+  steps_per_epoch: 20000
+
+  batch_size: 2048
+  update_epochs: 4
+
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+
+  vf_coef: 0.5
+  ent_coef: 0.01
+  lr: 0.0001
+
+  max_episode_steps: 5000
+
+evaluation:
+  games: 2000
+  seeds: [42, 43, 44]

@@ -598,6 +598,7 @@ class MahjongEnv:
             dora_indicators=state.dora_indicators,
             ura_indicators=ura,
             kiriage_mangan=self.rules.kiriage_mangan,
+            double_yakuman=self.rules.double_yakuman,
         )
 
     def _resolve_tsumo(self, seat: int) -> dict:

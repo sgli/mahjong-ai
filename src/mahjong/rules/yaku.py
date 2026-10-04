@@ -168,9 +168,34 @@ def _chuuren_ok(tiles) -> bool:
     return ranks[1] >= 3 and ranks[9] >= 3 and all(ranks[r] >= 1 for r in range(2, 9))
 
 
+def _chuuren_9sided(tiles, win_tile: str) -> bool:
+    """純正九蓮宝燈（9 面待）：13 张 1112345678999 + 任意 1-9。"""
+    if not _chuuren_ok(tiles):
+        return False
+    suit = next(iter({suit_of(t) for t in tiles if suit_of(t) is not None}))
+    counts = {f"{r}{suit}": 0 for r in "123456789"}
+    for t in tiles:
+        if suit_of(t) == suit:
+            counts[normalize(t)] += 1
+    w = normalize(win_tile)
+    if counts.get(w, 0) <= 0:
+        return False
+    counts[w] -= 1  # 去掉和牌张后应为 1112345678999
+    for r in "123456789":
+        expected = 3 if r in "19" else 1
+        if counts[f"{r}{suit}"] != expected:
+            return False
+    return True
+
+
 # -- yaku detection ------------------------------------------------------------
-def compute_yaku(structure, ctx: WinContext, wait_type: str | None = None) -> YakuResult:
-    """Detect yaku for one interpretation of a winning hand."""
+def compute_yaku(structure, ctx: WinContext, wait_type: str | None = None, double_yakuman: bool = False) -> YakuResult:
+    """Detect yaku for one interpretation of a winning hand.
+
+    ``double_yakuman=True``（Phase 10.3 §7 方案 A）时，双倍役满变体在
+    ``yakuman`` 列表中出现两次（大四喜、四暗刻単騎、純正九蓮 9 面；国士 13 面在
+    ``score_hand`` 处理），使 ``len(yakuman)`` 翻倍 → 8000*2 点。
+    """
     tiles = _all_tiles(structure)
     result = YakuResult()
     has_honors = any(_is_honor(t) for t in tiles)
@@ -247,7 +272,11 @@ def compute_yaku(structure, ctx: WinContext, wait_type: str | None = None) -> Ya
             result.yaku.append(("sanshoku_doukou", 2))
             break
     if len(closed_triplets) >= 4:
-        result.yakuman.append("suuankou")
+        if double_yakuman and (wait_type or _wait_type(structure, ctx.win_tile)) == "tanki":
+            result.yakuman.append("suuankou_tanki")  # 四暗刻単騎：双倍
+            result.yakuman.append("suuankou_tanki")
+        else:
+            result.yakuman.append("suuankou")
     elif len(closed_triplets) >= 3:
         result.yaku.append(("sanankou", 2))
     if len(quads) >= 4:
@@ -302,11 +331,19 @@ def compute_yaku(structure, ctx: WinContext, wait_type: str | None = None) -> Ya
         result.yakuman.append("chinroutou")
     wind_triplets = [t for t in triplets if t in _WINDS]
     if len(wind_triplets) >= 4:
-        result.yakuman.append("daisuushii")
+        if double_yakuman:
+            result.yakuman.append("daisuushii")
+            result.yakuman.append("daisuushii")
+        else:
+            result.yakuman.append("daisuushii")
     elif len(wind_triplets) == 3 and structure.pair in _WINDS:
         result.yakuman.append("shousuushii")
     if ctx.is_menzen and _chuuren_ok(tiles):
-        result.yakuman.append("chuuren_poutou")
+        if double_yakuman and _chuuren_9sided(tiles, ctx.win_tile):
+            result.yakuman.append("chuuren_poutou")
+            result.yakuman.append("chuuren_poutou")
+        else:
+            result.yakuman.append("chuuren_poutou")
 
     return result
 

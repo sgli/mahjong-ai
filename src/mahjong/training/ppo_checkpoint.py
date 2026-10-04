@@ -71,6 +71,10 @@ def save_ppo_checkpoint(
     scaler_state: dict | None = None,
     scheduler_state_dict: dict | None = None,
     rng_states: dict | None = None,
+    opponent_pool_version: str | None = None,
+    opponent_pool_config: dict | None = None,
+    rollout_version: str | None = None,
+    training_stage: str | None = None,
 ) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +103,11 @@ def save_ppo_checkpoint(
         "model_version": model_version,
         "git_commit": git_commit_hash,
         "scaler_state": scaler_state,
+        # Phase 10.3 §22 扩展字段
+        "opponent_pool_version": opponent_pool_version,
+        "opponent_pool_config": opponent_pool_config,
+        "rollout_version": rollout_version,
+        "training_stage": training_stage,
     }
     torch.save(payload, p)
     return p
@@ -110,6 +119,9 @@ def load_ppo_checkpoint(path: str | Path, map_location: str = "cpu") -> dict:
         raise TypeError(f"PPO checkpoint must be a dict, got {type(payload)}")
     if payload.get("checkpoint_type") != CHECKPOINT_TYPE:
         raise ValueError(f"not a PPO checkpoint: checkpoint_type={payload.get('checkpoint_type')!r}")
+    # 向后兼容：旧 checkpoint 缺 §22 字段时补 None
+    for key in ("opponent_pool_version", "opponent_pool_config", "rollout_version", "training_stage"):
+        payload.setdefault(key, None)
     return payload
 
 
