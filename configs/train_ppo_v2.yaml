@@ -10,9 +10,11 @@ environment_version: "tenhou-v2-rl"
 reward_version: "reward-v1"
 model_version: "ppo-v2"
 
-# §22 / §23 实验追踪字段
+# §22 / §23 实验追踪字段（下列值必须与 training 段中实际生效的设置一致，避免误读）
+# 注：train_ppo 只读取 training.* 下的同名键；此处为对外声明的元数据。
 opponent_pool_version: "pool-v1"
-rollout_version: "rollout-v1"
+rollout_version: "rollout-v2"
+rng_version: "rng-v2"
 training_stage: "pilot"
 opponent_pool_config:
   random-v1: 0.10
@@ -21,6 +23,19 @@ opponent_pool_config:
   ppo-v1: 0.20
   historical: 0.20
 
+# 对手 checkpoint 来源（只读；缺失会显式报错，不会静默丢弃）
+# historical 目录会经 register_historical_checkpoints 注册为 historical:<stem>
+opponent_checkpoints:
+  ppo-v1: "experiments/ppo_v1/latest.pt"
+  historical:
+    - "experiments/ppo_v2/milestones/ppo-20k"
+    - "experiments/ppo_v2/milestones/ppo-50k"
+    - "experiments/ppo_v2/milestones/ppo-100k"
+
+# current-ppo：固定初始快照（copy.deepcopy(model)，训练开始前冻结，不周期刷新）。
+# 与 ppo-v1 的区别：ppo-v1 是固定历史 checkpoint；current-ppo 是当前策略的初始冻结副本。
+# 若需要 current-ppo，把 "current-ppo": 0.xx 加入 opponent_pool_config 即可（刷新语义见上）。
+
 model:
   hidden_sizes: [256, 256]
 
@@ -28,6 +43,19 @@ training:
   seed: 42
   env_seed: 42
   device: "cuda"
+
+  # 实验 D：BC anchor（默认关闭，β=0 完全等价于纯 PPO）
+  bc_anchor_beta: 0.0
+  bc_anchor_checkpoint: "experiments/bc_v2.1/checkpoints/best.pt"
+
+  # §7 诊断埋点：update-epoch KL / ratio / clip 分项 + 分布统计（默认开启）
+  diagnose: true
+  attribution: false
+
+  # §8：优化 rollout 设为正式训练默认（rng-v2 使 sampling 也逐位对齐 reference）
+  # 注：rng-v2/rollout-v2 与既有 rng-v1/rollout-v1 实验不可逐位比较；回退：设 rng-v1 + rollout-v1
+  rollout_version: "rollout-v2"
+  rng_version: "rng-v2"
 
   num_envs: 16
   epochs: 5

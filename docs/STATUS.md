@@ -31,12 +31,34 @@
   - **Pilot-A/B/C**（target 2k/5k/10k，实际 **2,371 / 6,964 / 10,891** steps）：**全部健康**（全指标 finite、无 NaN/Inf、`illegal_rate=0`、env 正常结束、checkpoint/resume 正常）
   - **Benchmark 12000 局**：PPO-v1 对 random / rule 占优；对 BC-v2.1 greedy 略优、**sampling 落败**（如实记录，符合 §32 定位）
   - **判定：PASS**（§28 DoD 逐条通过）→ 允许进入 Phase 10.3（**需用户决定**，§31.11 不得自动进入）
+- **Phase 10.3**：Large-scale PPO / Self-play / Opponent Pool / **PPO 回归诊断（已完成，规范 §1–§18 无未完成项）**（见 `docs/PHASE10.3.md`、`docs/PHASE10.3_PPO_REGRESSION_DIAGNOSIS.md`、**`docs/PHASE10.3_PPO_REGRESSION_DIAGNOSIS_RESULT.md`**）
+  - **§8 Profiling**：瓶颈 = 逐步 `feature_encode` 44.9% + `forward_sample` 32.8%（env 仅 ~8%）；基线 **1047.5 steps/sec**
+  - **§9–§11 性能工程**：并行 rollout + batch encode/mask/forward + 预分配 buffer → **3588 steps/sec（3.5×）**；**已接入训练**（默认 `rollout-v2` + `rng-v2`；`tests/test_ppo_rollout_parity.py` 证明 greedy 精确 + **sampling 逐位对齐**）
+  - **§12/§13 Opponent Pool**（概率来自 config、seeded 可复现、historical 自动注册）+ **§22 checkpoint v2**（opponent_pool_version/config、rollout_version、training_stage）+ `configs/train_ppo_v2.yaml`
+  - **§7 double_yakuman（方案 A）**：大四喜 / 四暗刻単騎 / 純正九蓮9面 / 国士13面 按双倍结算；默认 `False`（不 bump environment_version）；`validate_rules` 无回归
+  - **课程训练 20k → 50k → 100k（resume 累积 22,106 → 52,777 → 103,355）**：各档数值健康（finite、illegal 0、entropy 未塌缩），**但策略单调退化**
+  - **多 seed baseline（24000 局）+ Stage C 综合 Benchmark（48000 局）**：见 Benchmark 报告
+  - **PPO 回归诊断（规范 §1–§18 已全部执行完毕）**：根因 = **G. 纯自对弈漂移（主因，对手池可消除）+ D. 学习率 1e-4 过大导致 BC 遗忘**；F（奖励对齐）小幅有效；**A/B/E/H 已排除**；C（value）为次要残余
+  - **有效修复**：`lr=2e-5` + **BC anchor `β≥1.0`**（规格建议的 β=0.001–0.01 **量级不足**）+ **对手池** + **γ=0.999** + **纯顺位奖励**
+  - **最终最佳配置 F1**（`experiments/ppo_fix/f1`）：对手池 + 纯顺位奖励(score=0) + lr=2e-5 + β=1.0 + γ=0.999 + 共享 trunk，2 epochs(≈44k)
+  - **3-seed 公平口径（两侧同 mode/温度，镜像基线 1.5020≈1.5）**：F1 vs BC **1.5043 ± 0.0347**（打平）；F1 vs rule **0.5640 ± 0.0062** vs BC **0.5770 ± 0.0062**（**小幅领先 +0.013**）；retention **0.8579** ✅；sampling 打平/略差
+  - **判定**：**RL Infrastructure PASS / Strategy Improvement 有限** —— **未达 §16 GO → 不恢复 50k/1M 扩容**（§38：扩容须先有增益证据）
+  - **⚠️ 基准缺陷（已修）**：`--candidate-mode` / `--candidate-temperature` 此前只作用于候选、未传播给对手 → 见下方「结论作废声明」；现已支持 `--opponent-mode` / `--opponent-temperature`
+  - **详见** `docs/PHASE10.3_PPO_REGRESSION_DIAGNOSIS_RESULT.md`（最终文档：全部数据、根因、撤回清单、复现命令）
+
+## ⚠️ 结论作废声明（2026-10-04）
+
+**以下历史 Benchmark 数字因「候选专属参数未传播给对手」的 harness 缺陷而作废，不得引用**：
+Phase 10.1.1 的 `vs bc-v1 greedy` 列；Phase 10.2 的 `PPO greedy vs BC-v2.1 = 1.0750`；Phase 10.3 Stage C 的 `PPO-20k/50k/100k greedy vs BC = 1.1053/1.2590/1.3803`。
+**仍有效**：所有 `vs rule`、`vs random` 数字；`sampling@T=1.0` 的 `vs bc_v2.1`。
+依据与证据：`docs/PHASE10.3_PPO_REGRESSION_DIAGNOSIS_RESULT.md` §8。
 
 ## 最新 commit
 
+- `189af84`（Phase 10.3：大规模 PPO 基础设施 + 多 seed Benchmark + 诊断）
 - `118ce32`（Phase 10.1.1 STATUS 更新）
 - `828c715`（Phase 10.1.1：训练基础设施优化 + bc-v2.1 + 30000 局 Benchmark）
-- Phase 10.2 全套见 git log 最新提交
+- Phase 10.3 诊断全套见 git log 最新提交
 
 ## 版本
 
@@ -58,6 +80,8 @@
 | bc-v1 | decision-v1 小规模 | ~0.55 | — |
 | bc-v2 | decision-v2 全量 1 epoch | 0.6792 | — |
 | **bc-v2.1** | decision-v2 全量 5 epoch（best = epoch 2） | **0.69788** | **0.69782** |
+
+> ⚠️ **下表 `vs bc-v1` 的 greedy 数字（0.1586）因 harness 缺陷作废**（见上文「结论作废声明」）；`vs random` / `vs rule` 仍有效。
 
 ### BC-v2.1 Benchmark（每对手 5000 局，candidate mean_rank 越低越好）
 

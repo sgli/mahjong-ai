@@ -92,6 +92,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--steps-per-epoch", type=int, help="override steps_per_epoch")
     ap.add_argument("--seed", type=int, help="override seed")
     ap.add_argument("--resume", help="resume from a PPO checkpoint (latest.pt / epoch_N.pt)")
+    ap.add_argument("--bc-anchor-beta", type=float, help="BC anchor β（默认从 config 读，0.0=关闭）")
+    ap.add_argument("--bc-anchor-checkpoint", help="BC anchor checkpoint（冻结的 π_BC）")
+    ap.add_argument("--rollout-version", help="rollout-v1（reference，默认）| rollout-v2（optimized batch）")
+    ap.add_argument("--attribution", action="store_true", help="启用 per-opponent/per-seat 归因埋点（§4/§11）")
+    ap.add_argument("--diagnose", action="store_true", default=None, help="启用 update-epoch KL/ratio/clip 分项 + 分布统计（§7；默认从 config training.diagnose）")
+    ap.add_argument("--no-diagnose", action="store_false", dest="diagnose", help="显式关闭 diagnose")
+    ap.add_argument("--rng-version", help="rng-v1（全局流，默认）| rng-v2（per-env，sampling 逐位对齐）")
+    ap.add_argument("--warmup-steps", type=int, help="critic 预热步数（默认 0=关；预热期只训 value）")
+    ap.add_argument("--warmup-freeze-trunk", action="store_true", default=None, help="预热期冻结 trunk+action_head（严格 actor 冻结）")
+    ap.add_argument("--reward-clip", type=float, help="per-step reward winsorize 阈值（默认 0=关；仅尺度处理）")
+    ap.add_argument("--reward-score-scale", type=float, help="覆盖 reward score 项系数（默认 null=用 reward-v1 的 0.001）")
+    ap.add_argument("--value-separate-trunk", action="store_true", default=False, help="value 使用独立 trunk（默认 false=共享）")
     args = ap.parse_args(argv)
 
     cfg = _load_config(Path(args.config))
@@ -100,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
 
     checkpoint_dir = Path(cfg["checkpoint_dir"])
     hidden_sizes = tuple(model_cfg.get("hidden_sizes", [128, 128]))
+    value_separate_trunk = bool(model_cfg.get("value_separate_trunk", False)) if not args.value_separate_trunk else True
     epochs = args.epochs if args.epochs is not None else train_cfg.get("epochs", 3)
     steps_per_epoch = args.steps_per_epoch if args.steps_per_epoch is not None else train_cfg.get("steps_per_epoch", 400)
     seed = args.seed if args.seed is not None else train_cfg.get("seed", 0)
@@ -109,16 +122,64 @@ def main(argv: list[str] | None = None) -> int:
     _seed_everything(seed)
 
     encoder = ObservationEncoder()
-    model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden_sizes).to(device)
+    model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden_sizes, value_separate_trunk=value_separate_trunk).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.get("lr", 0.0005))
 
     config = {
-        "model": {"hidden_sizes": list(hidden_sizes)},
+        "model": {"hidden_sizes": list(hidden_sizes), "value_separate_trunk": value_separate_trunk},
         "feature_dim": FEATURE_DIM,
         "action_space_size": ACTION_SPACE_SIZE,
         "training": {k: v for k, v in train_cfg.items() if k != "device"},
     }
     env_seed = train_cfg.get("env_seed", 0)
+
+    # BC anchor（实验 D）：β 默认 0（等价纯 PPO）；β>0 时加载冻结的 π_BC
+    bc_anchor_beta = args.bc_anchor_beta if args.bc_anchor_beta is not None else train_cfg.get("bc_anchor_beta", 0.0)
+    bc_anchor_ckpt = args.bc_anchor_checkpoint or train_cfg.get("bc_anchor_checkpoint") or cfg.get("bc_checkpoint")
+    bc_model = None
+    if bc_anchor_beta > 0.0:
+        if not bc_anchor_ckpt or not Path(bc_anchor_ckpt).exists():
+            raise SystemExit(f"bc anchor checkpoint not found: {bc_anchor_ckpt}")
+        from mahjong.evaluation import load_policy
+
+        _, bc_model = load_policy(bc_anchor_ckpt, device)
+        bc_model.eval()
+        for p in bc_model.parameters():
+            p.requires_grad_(False)
+        log.info("BC anchor enabled: beta=%s checkpoint=%s", bc_anchor_beta, bc_anchor_ckpt)
+    config["training"]["bc_anchor_beta"] = bc_anchor_beta
+    config["training"]["bc_anchor_checkpoint"] = bc_anchor_ckpt
+
+    # Opponent pool（§12/§13）：配置了 opponent_pool_config 才启用（默认 None = self-play）
+    opponent_pool = None
+    opponent_checkpoint_map = None
+    current_ppo = None
+    opponent_pool_config = cfg.get("opponent_pool_config")
+    if opponent_pool_config:
+        from mahjong.training import TrainingOpponentPool, register_historical_checkpoints
+
+        pool_seed = train_cfg.get("opponent_pool_seed", seed)
+        opponent_pool = TrainingOpponentPool({}, dict(opponent_pool_config), seed=pool_seed)
+        log.info("Opponent pool enabled: %s", opponent_pool_config)
+
+        # checkpoint_map：ppo-v1 + historical:*（只读）
+        opp_ckpts = cfg.get("opponent_checkpoints") or {}
+        opponent_checkpoint_map = {}
+        if "ppo-v1" in opp_ckpts:
+            opponent_checkpoint_map["ppo-v1"] = opp_ckpts["ppo-v1"]
+        for entry in opp_ckpts.get("historical") or []:
+            p = Path(entry)
+            if p.is_dir():
+                opponent_checkpoint_map.update(register_historical_checkpoints(p))
+            else:
+                opponent_checkpoint_map[f"historical:{p.stem}"] = str(p)
+
+        # current-ppo：初始快照（冻结当前策略；未实现周期性刷新，文档标注）
+        if "current-ppo" in opponent_pool_config:
+            import copy
+
+            current_ppo = (copy.deepcopy(model), encoder)
+            log.info("current-ppo snapshot created (initial, no periodic refresh)")
 
     start_epoch = 0
     global_step = 0
@@ -203,6 +264,23 @@ def main(argv: list[str] | None = None) -> int:
         start_epoch=start_epoch,
         global_step=global_step,
         on_epoch_end=on_epoch_end,
+        bc_model=bc_model,
+        bc_anchor_beta=bc_anchor_beta,
+        rollout_version=args.rollout_version or train_cfg.get("rollout_version", "rollout-v1"),
+        attribution=args.attribution or train_cfg.get("attribution", False),
+        diagnose=args.diagnose if args.diagnose is not None else train_cfg.get("diagnose", True),
+        opponent_pool=opponent_pool,
+        opponent_bc_checkpoint=cfg.get("bc_checkpoint"),
+        opponent_checkpoint_map=opponent_checkpoint_map,
+        current_ppo=current_ppo,
+        opponent_mode=train_cfg.get("opponent_mode", "sampling"),
+        opponent_temperature=train_cfg.get("opponent_temperature", 1.0),
+        opponent_pool_seed=train_cfg.get("opponent_pool_seed", seed),
+        rng_version=args.rng_version or train_cfg.get("rng_version", "rng-v1"),
+        warmup_steps=args.warmup_steps if args.warmup_steps is not None else train_cfg.get("warmup_steps", 0),
+        warmup_freeze_trunk=args.warmup_freeze_trunk if args.warmup_freeze_trunk is not None else train_cfg.get("warmup_freeze_trunk", True),
+        reward_clip=args.reward_clip if args.reward_clip is not None else train_cfg.get("reward_clip", 0.0),
+        reward_score_scale=args.reward_score_scale if args.reward_score_scale is not None else train_cfg.get("reward_score_scale"),
     )
 
     history = prev_history + history

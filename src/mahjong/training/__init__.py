@@ -32,7 +32,7 @@ from .ppo import (
     ppo_loss,
     train_ppo,
 )
-from .opponent_pool import TrainingOpponentPool, register_historical_checkpoints
+from .opponent_pool import TrainingOpponentPool, build_opponent, collect_trajectory_with_opponents, register_historical_checkpoints, sample_seats
 from .ppo_buffer import EpisodeMetadata, TrajectoryBuffer, TrajectoryStep
 from .ppo_checkpoint import (
     capture_ppo_rng_states,
@@ -50,6 +50,8 @@ __all__ = [
     "TrajectoryStep",
     "TrainingOpponentPool",
     "approx_kl",
+    "build_opponent",
+    "collect_trajectory_with_opponents",
     "capture_ppo_rng_states",
     "capture_rng_states",
     "clip_fraction",
@@ -72,6 +74,7 @@ __all__ = [
     "ppo_loss",
     "register_historical_checkpoints",
     "restore_ppo_rng_states",
+    "sample_seats",
     "restore_rng_states",
     "save_checkpoint",
     "save_ppo_checkpoint",

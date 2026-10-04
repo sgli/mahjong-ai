@@ -114,6 +114,7 @@ class PolicyOpponent(Opponent):
         device: str | torch.device = "cpu",
         mode: str = "sampling",
         checkpoint_type: str | None = None,
+        temperature: float = 1.0,
     ):
         super().__init__(
             opponent_id=opponent_id,
@@ -126,6 +127,7 @@ class PolicyOpponent(Opponent):
             raise ValueError(f"mode must be greedy|sampling, got {mode!r}")
         self.device = torch.device(device)
         self.mode = mode
+        self.temperature = temperature
         self.encoder, self.model = load_policy(checkpoint, self.device, checkpoint_type=checkpoint_type)
 
     def decide(self, observation, legal_actions: list, rng: random.Random):
@@ -139,8 +141,9 @@ class PolicyOpponent(Opponent):
             if self.mode == "greedy":
                 action_id = int(out.logits.argmax(dim=-1).item())
             else:
-                probs = torch.softmax(out.logits, dim=-1)
-                generator = torch.Generator(device="cpu")
+                # 温度采样：logits/T 后再 masked softmax；T=1.0 与现有行为逐位一致
+                probs = torch.softmax(out.logits / self.temperature, dim=-1)
+                generator = torch.Generator(device=probs.device)
                 generator.manual_seed(rng.randrange(1 << 31))
                 action_id = int(torch.multinomial(probs, 1, generator=generator).squeeze(-1).item())
         return next(a for a in actions if action_to_id(a) == action_id)

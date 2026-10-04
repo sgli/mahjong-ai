@@ -58,20 +58,27 @@ def remap_bc_state_dict(state_dict: dict) -> dict:
 class MLPPolicy(nn.Module):
     """Batched core: features ``[B, F]`` + mask ``[B, A]`` -> (logits, value)."""
 
-    def __init__(self, feature_dim: int, action_size: int, hidden_sizes=(256, 256)) -> None:
+    def __init__(self, feature_dim: int, action_size: int, hidden_sizes=(256, 256), value_separate_trunk: bool = False) -> None:
         super().__init__()
         self.feature_dim = feature_dim
         self.action_size = action_size
         self.hidden_sizes = tuple(hidden_sizes)
+        self.value_separate_trunk = value_separate_trunk
         self.trunk = _build_trunk(feature_dim, hidden_sizes)
         last = hidden_sizes[-1] if hidden_sizes else feature_dim
         self.action_head = nn.Linear(last, action_size)
         self.value_head = nn.Linear(last, 1)
+        # H1：value 使用独立 trunk（默认 False=共享，行为逐位不变）
+        if value_separate_trunk:
+            self.value_trunk = _build_trunk(feature_dim, hidden_sizes)
 
     def _heads(self, features: torch.Tensor):
         h = self.trunk(features)
         logits = self.action_head(h)
-        value = self.value_head(h).squeeze(-1)
+        if getattr(self, "value_separate_trunk", False):
+            value = self.value_head(self.value_trunk(features)).squeeze(-1)
+        else:
+            value = self.value_head(h).squeeze(-1)
         return logits, value
 
     def forward(self, features: torch.Tensor, legal_mask: torch.Tensor) -> PolicyOutput:

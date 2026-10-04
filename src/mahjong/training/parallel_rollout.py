@@ -80,15 +80,20 @@ def collect_batch_trajectory(
     *,
     max_steps: int,
     greedy: bool = False,
+    base_seed: int = 0,
 ) -> tuple[list[dict[int, TrajectoryBuffer]], list[bool], int, int]:
     """Run one game on each env simultaneously with batched inference.
 
     Returns ``(trajs, dones, steps, illegal)`` where ``trajs[i]`` is a per-seat
     ``TrajectoryBuffer`` dict (same schema as sequential ``collect_trajectory``).
+
+    Sampling 使用每 env 独立、确定性播种的 RNG（``base_seed + 100000 * env_index``），
+    使每个 env 的动作序列与全局交错顺序无关（可复现）。
     """
     for env in envs:
         env.reset()
     n = len(envs)
+    generators = [torch.Generator().manual_seed(base_seed + 100_000 * i) for i in range(n)]
     trajs: list[dict[int, TrajectoryBuffer]] = [{s: TrajectoryBuffer() for s in range(4)} for _ in range(n)]
     pendings: list[dict] = [{s: 0.0 for s in range(4)} for _ in range(n)]
     dones = [False] * n
@@ -115,18 +120,18 @@ def collect_batch_trajectory(
         with torch.no_grad():
             out = model(feat_batch, mask_batch)
             log_probs = torch.log_softmax(out.logits, dim=-1)
-            if greedy:
-                action_ids = log_probs.argmax(dim=-1)
-            else:
-                probs = torch.exp(log_probs)
-                action_ids = torch.multinomial(probs, 1).squeeze(-1)
         values = out.value
 
         for j, i in enumerate(active):
             env = envs[i]
             seat = seat_list[j]
             legal = legal_list[j]
-            aid = int(action_ids[j].item())
+            # 逐 env、用各自独立 RNG 采样（保留 batched forward；采样不再用一次 batch multinomial）
+            if greedy:
+                aid = int(log_probs[j].argmax(dim=-1).item())
+            else:
+                probs_j = torch.exp(log_probs[j])
+                aid = int(torch.multinomial(probs_j.unsqueeze(0), 1, generator=generators[i]).squeeze(-1).item())
             if not mask_batch[j][aid].item():
                 illegal += 1  # should never happen (masked argmax/sampling)
             action = next(a for a in legal if action_to_id(a) == aid)
