@@ -6,7 +6,7 @@ from mahjong.decision import Action, ActionType, PlayerObservation
 from mahjong.environment import MahjongEnv
 from mahjong.features import ACTION_SPACE_SIZE, FEATURE_DIM, ObservationEncoder, legal_mask
 from mahjong.model import MLPPolicy
-from mahjong.training import attribute_step_rewards, clipped_surrogate, collect_trajectory, compute_gae, ppo_loss
+from mahjong.training import attribute_step_rewards, clipped_surrogate, collect_trajectory, compute_gae, ppo_loss, train_ppo
 
 
 def _obs():
@@ -102,39 +102,45 @@ def test_ppo_loss_runs_and_has_metrics():
 
 # -- trajectory collection -----------------------------------------------------
 def _empty_traj():
-    return {
-        s: {"features": [], "action_ids": [], "log_probs": [], "values": [], "rewards": [], "masks": [], "dones": []}
-        for s in range(4)
-    }
+    from mahjong.training import TrajectoryBuffer
+
+    return {s: TrajectoryBuffer() for s in range(4)}
+
+
+def _add_zero_step(buf, n=1):
+    from mahjong.training import TrajectoryStep
+
+    for _ in range(n):
+        buf.append(TrajectoryStep(features=None, action_id=0, legal_mask=None, old_log_prob=0.0, value=0.0, reward=0.0, done=False))
 
 
 def test_attribute_step_rewards_ron():
     traj = _empty_traj()
     # seat 0 previously discarded (its last reward is 0), seat 1 rons
     for s in range(4):
-        traj[s]["rewards"].append(0.0)
+        _add_zero_step(traj[s])
     pending = {s: 0.0 for s in range(4)}
     # env.step returns the settlement deltas; acting seat is the ron winner (1)
     r = attribute_step_rewards({0: -2.6, 1: 3.6, 2: 0.0, 3: 0.0}, 1, traj, pending)
     assert r == 3.6  # winner's reward is recorded on its transition
-    assert traj[0]["rewards"][-1] == -2.6  # discarder's ron payment attributed retroactively
-    assert traj[2]["rewards"][-1] == 0.0
-    assert traj[3]["rewards"][-1] == 0.0
+    assert traj[0].steps[-1].reward == -2.6  # discarder's ron payment attributed retroactively
+    assert traj[2].steps[-1].reward == 0.0
+    assert traj[3].steps[-1].reward == 0.0
 
 
 def test_attribute_step_rewards_tsumo():
     traj = _empty_traj()
     for s in range(4):
-        traj[s]["rewards"].append(0.0)
+        _add_zero_step(traj[s])
     pending = {s: 0.0 for s in range(4)}
     # dealer tsumo: winner +3*2*scale, others -2*scale (example)
     r = attribute_step_rewards({0: 6.0, 1: -2.0, 2: -2.0, 3: -2.0}, 0, traj, pending)
     assert r == 6.0
-    assert traj[1]["rewards"][-1] == -2.0
-    assert traj[2]["rewards"][-1] == -2.0
-    assert traj[3]["rewards"][-1] == -2.0
+    assert traj[1].steps[-1].reward == -2.0
+    assert traj[2].steps[-1].reward == -2.0
+    assert traj[3].steps[-1].reward == -2.0
     # point conservation: winner reward + three losers' payments == 0
-    assert r + traj[1]["rewards"][-1] + traj[2]["rewards"][-1] + traj[3]["rewards"][-1] == 0.0
+    assert r + traj[1].steps[-1].reward + traj[2].steps[-1].reward + traj[3].steps[-1].reward == 0.0
 
 
 def test_collect_trajectory_runs():
@@ -145,7 +151,7 @@ def test_collect_trajectory_runs():
     traj, steps, illegal = collect_trajectory(env, model, encoder, torch.device("cpu"), max_steps=400)
     assert steps > 0
     assert illegal == 0
-    assert any(len(traj[s]["features"]) > 0 for s in range(4))
+    assert any(len(traj[s].steps) > 0 for s in range(4))
 
 
 def test_collect_trajectory_reward_conservation():
@@ -157,8 +163,27 @@ def test_collect_trajectory_reward_conservation():
     traj, steps, illegal = collect_trajectory(env, model, encoder, torch.device("cpu"), max_steps=3000)
     assert illegal == 0
     for s in range(4):
-        total = sum(traj[s]["rewards"]) if traj[s]["rewards"] else 0.0
+        total = sum(st.reward for st in traj[s].steps)
         assert abs(total - env.reward(s)) < 1e-6, f"seat {s}: {total} != {env.reward(s)}"
+
+
+def test_steps_per_epoch_upper_bound():
+    """steps_per_epoch = 每 epoch env step 上限；跑完当前 episode 再停（§17）。"""
+    torch.manual_seed(0)
+    model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, (16, 16))
+    encoder = ObservationEncoder()
+    opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+    history = train_ppo(
+        model, encoder, opt,
+        num_envs=1, env_seed=0, epochs=1, steps_per_epoch=200, batch_size=16, update_epochs=1,
+        gamma=0.99, lam=0.95, clip_eps=0.2, vf_coef=0.5, ent_coef=0.01,
+        device=torch.device("cpu"), max_episode_steps=300,
+    )
+    m = history[0]
+    assert m["target_steps"] == 200
+    assert m["steps"] >= 200
+    assert m["steps"] < 200 + 300  # 跑完当前 episode 再停（最多超出一个 episode 长度）
+    assert m["global_step"] == m["steps"]
 
 
 # -- seed reproducibility ------------------------------------------------------

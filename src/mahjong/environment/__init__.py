@@ -1,6 +1,6 @@
 """Mahjong Environment (Phase 6b)."""
 
-from .env import KYUUSHU_ACTION, SEAT_WINDS, MahjongEnv, RewardConfig, legal_actions_from_replay
+from .env import ENVIRONMENT_VERSION, KYUUSHU_ACTION, SEAT_WINDS, MahjongEnv, RewardConfig, legal_actions_from_replay
 from .state import (
     PHASE_CHANKAN,
     PHASE_DISCARD,
@@ -13,6 +13,7 @@ from .state import (
 from .wall import Wall
 
 __all__ = [
+    "ENVIRONMENT_VERSION",
     "KYUUSHU_ACTION",
     "PHASE_CHANKAN",
     "PHASE_DISCARD",

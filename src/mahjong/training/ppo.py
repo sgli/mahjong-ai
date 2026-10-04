@@ -21,9 +21,30 @@ from ..decision.action import Action
 from ..environment import MahjongEnv
 from ..features.action_space import action_to_id, legal_mask
 from ..features.encoder import ObservationEncoder
-from ..model.policy import MLPPolicy
+from ..model.policy import MLPPolicy, remap_bc_state_dict
+from .ppo_buffer import EpisodeMetadata, TrajectoryBuffer, TrajectoryStep
 
 log = logging.getLogger("training.ppo")
+
+
+def init_ppo_from_bc(model: MLPPolicy, bc_state_dict: dict, *, reinit_value_head: bool = True) -> MLPPolicy:
+    """Initialise a PPO model from a BC checkpoint (§4).
+
+    BC trunk + BC action head are kept exactly (policy unchanged); the value
+    head is re-initialised (BC has no trained value head).  Returns ``model``.
+    """
+    sd = remap_bc_state_dict(dict(bc_state_dict))
+    # 保留 trunk + action head，剔除 value head（重新初始化）
+    filtered = {k: v for k, v in sd.items() if not k.startswith("value_head.")}
+    model.load_state_dict(filtered, strict=False)
+    if reinit_value_head:
+        for name, param in model.named_parameters():
+            if name.startswith("value_head."):
+                if param.dim() >= 2:
+                    torch.nn.init.xavier_uniform_(param)
+                else:
+                    torch.nn.init.zeros_(param)
+    return model
 
 
 def compute_gae(rewards, values, dones, gamma: float, lam: float):
@@ -49,6 +70,17 @@ def clipped_surrogate(log_probs, old_log_probs, advantages, clip_eps: float) -> 
     return torch.min(surr1, surr2)
 
 
+def approx_kl(old_log_probs, log_probs) -> torch.Tensor:
+    """Fixed KL approximation: ``mean(old_log_prob - new_log_prob)`` (§14)."""
+    return (old_log_probs - log_probs).mean()
+
+
+def clip_fraction(old_log_probs, log_probs, clip_eps: float) -> torch.Tensor:
+    """Fixed clip fraction: ``fraction(|ratio - 1| > clip_eps)`` (§14)."""
+    ratio = torch.exp(log_probs - old_log_probs)
+    return ((ratio - 1.0).abs() > clip_eps).float().mean()
+
+
 def ppo_loss(
     model: MLPPolicy,
     features,
@@ -62,8 +94,13 @@ def ppo_loss(
     vf_coef: float,
     ent_coef: float,
 ):
-    """Clipped surrogate objective + value loss + entropy bonus."""
+    """Clipped surrogate objective + value loss + entropy bonus.
+
+    Also reports PPO diagnostics (§14): ``approx_kl = mean(old - new)`` and
+    ``clip_fraction = fraction(|ratio - 1| > clip_eps)``.
+    """
     log_probs, values, entropy = model.evaluate_actions(features, masks, action_ids)
+    ratio = torch.exp(log_probs - old_log_probs)
     policy_loss = -clipped_surrogate(log_probs, old_log_probs, advantages, clip_eps).mean()
     value_loss = F.mse_loss(values, returns)
     entropy_loss = -entropy.mean()
@@ -72,7 +109,9 @@ def ppo_loss(
         "policy_loss": float(policy_loss.item()),
         "value_loss": float(value_loss.item()),
         "entropy": float(entropy.mean().item()),
-        "mean_ratio": float((torch.exp(log_probs - old_log_probs)).mean().item()),
+        "mean_ratio": float(ratio.mean().item()),
+        "approx_kl": float(approx_kl(old_log_probs, log_probs).item()),
+        "clip_fraction": float(clip_fraction(old_log_probs, log_probs, clip_eps).item()),
     }
     return loss, metrics
 
@@ -89,8 +128,9 @@ def attribute_step_rewards(rewards: dict, acting_seat: int, traj: dict, pending:
     reward = rewards.get(acting_seat, 0.0) + pending.pop(acting_seat, 0.0)
     for s, r in rewards.items():
         if s != acting_seat and r != 0.0:
-            if traj[s]["rewards"]:
-                traj[s]["rewards"][-1] += r
+            buf = traj[s]
+            if buf.steps:
+                buf.steps[-1].reward += r
             else:
                 pending[s] = pending.get(s, 0.0) + r
     return reward
@@ -99,22 +139,20 @@ def attribute_step_rewards(rewards: dict, acting_seat: int, traj: dict, pending:
 def flush_terminal_rewards(env: MahjongEnv, traj: dict, pending: dict) -> None:
     """At game end, flush residual pending rewards + placement bonuses to each seat's last transition."""
     for s in range(4):
+        buf = traj[s]
         if pending.get(s, 0.0):
-            if traj[s]["rewards"]:
-                traj[s]["rewards"][-1] += pending[s]
+            if buf.steps:
+                buf.steps[-1].reward += pending[s]
             pending[s] = 0.0
-        if traj[s]["rewards"]:
+        if buf.steps:
             rank = env.state.final_ranks[s]
-            traj[s]["rewards"][-1] += env.reward_config.placement_bonus[rank]
+            buf.steps[-1].reward += env.reward_config.placement_bonus[rank]
 
 
 def collect_trajectory(env: MahjongEnv, model: MLPPolicy, encoder: ObservationEncoder, device, *, max_steps: int):
-    """Run one game (self-play), returning per-seat transition dicts and step count."""
+    """Run one game (self-play), returning per-seat ``TrajectoryBuffer`` + step count (§11)."""
     env.reset()
-    traj = {
-        s: {"features": [], "action_ids": [], "log_probs": [], "values": [], "rewards": [], "masks": [], "dones": []}
-        for s in range(4)
-    }
+    traj: dict[int, TrajectoryBuffer] = {s: TrajectoryBuffer() for s in range(4)}
     pending = {s: 0.0 for s in range(4)}
     illegal = 0
     steps = 0
@@ -141,14 +179,17 @@ def collect_trajectory(env: MahjongEnv, model: MLPPolicy, encoder: ObservationEn
         rewards, done = env.step(action)
         reward = attribute_step_rewards(rewards, seat, traj, pending)
 
-        t = traj[seat]
-        t["features"].append(features.cpu())
-        t["action_ids"].append(action_id)
-        t["log_probs"].append(log_prob)
-        t["values"].append(value)
-        t["rewards"].append(reward)
-        t["masks"].append(mask.cpu())
-        t["dones"].append(bool(done))
+        traj[seat].append(
+            TrajectoryStep(
+                features=features.cpu(),
+                action_id=action_id,
+                legal_mask=mask.cpu(),
+                old_log_prob=log_prob,
+                value=value,
+                reward=reward,
+                done=bool(done),
+            )
+        )
         steps += 1
 
     if env.done():
@@ -179,39 +220,61 @@ def train_ppo(
     device,
     max_episode_steps: int = 5000,
     log_interval_epochs: int = 1,
+    start_epoch: int = 0,
+    global_step: int = 0,
+    on_epoch_end=None,
 ) -> list[dict]:
-    """Run PPO training and return per-epoch metrics history."""
+    """Run PPO training and return per-epoch metrics history.
+
+    ``start_epoch`` / ``global_step`` support resume: the loop runs
+    ``range(start_epoch + 1, epochs + 1)`` and ``global_step`` is cumulative.
+    """
     envs = [MahjongEnv(seed=env_seed + i) for i in range(num_envs)]
     history = []
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch + 1, epochs + 1):
         buffer = {"features": [], "action_ids": [], "log_probs": [], "values": [], "rewards": [], "masks": [], "dones": []}
         total_steps = 0
         illegal_total = 0
         episode_rewards: list[float] = []
         returns_sum: list[float] = []
 
+        # §17：steps_per_epoch = 每 epoch 的 env step 上限。跑完当前 episode 再停，
+        # 因此实际 steps 会略超出（∈ [N, N + max_episode_steps)），并记录 target_steps。
         while total_steps < steps_per_epoch:
             for env in envs:
                 traj, n_steps, illegal = collect_trajectory(env, model, encoder, device, max_steps=max_episode_steps)
                 total_steps += n_steps
                 illegal_total += illegal
                 for s in range(4):
-                    t = traj[s]
-                    if not t["rewards"]:
+                    buf = traj[s]
+                    if not buf.steps:
                         continue
-                    adv, ret = compute_gae(t["rewards"], t["values"], t["dones"], gamma, lam)
-                    buffer["features"].extend(t["features"])
-                    buffer["action_ids"].extend(t["action_ids"])
-                    buffer["log_probs"].extend(t["log_probs"])
-                    buffer["values"].extend(t["values"])
-                    buffer["rewards"].extend(t["rewards"])
-                    buffer["masks"].extend(t["masks"])
-                    buffer["dones"].extend(t["dones"])
+                    rewards = [st.reward for st in buf.steps]
+                    values = [st.value for st in buf.steps]
+                    dones = [st.done for st in buf.steps]
+                    adv, ret = compute_gae(rewards, values, dones, gamma, lam)
+                    buffer["features"].extend(st.features for st in buf.steps)
+                    buffer["action_ids"].extend(st.action_id for st in buf.steps)
+                    buffer["log_probs"].extend(st.old_log_prob for st in buf.steps)
+                    buffer["values"].extend(values)
+                    buffer["rewards"].extend(rewards)
+                    buffer["masks"].extend(st.legal_mask for st in buf.steps)
+                    buffer["dones"].extend(dones)
                     buffer.setdefault("advantages", []).extend(adv)
                     buffer.setdefault("returns", []).extend(ret)
-                    episode_rewards.append(sum(t["rewards"]))
+                    episode_rewards.append(sum(rewards))
                     returns_sum.append(sum(ret))
+                if total_steps >= steps_per_epoch:
+                    break
+
+        # §15：rollout-wide advantage normalization（GAE 完成后对整 buffer 归一化一次）
+        adv_tensor = torch.tensor(buffer["advantages"], dtype=torch.float32)
+        advantage_mean = float(adv_tensor.mean().item())
+        advantage_std = float(adv_tensor.std().item())
+        buffer["advantages"] = ((adv_tensor - advantage_mean) / (advantage_std + 1e-8)).tolist()
+        episode_count = len(episode_rewards)
+        episode_length = total_steps / max(episode_count, 1)
 
         # PPO updates
         n = len(buffer["features"])
@@ -230,9 +293,6 @@ def train_ppo(
                 advantages = torch.tensor([buffer["advantages"][i] for i in idx], dtype=torch.float32, device=device)
                 returns = torch.tensor([buffer["returns"][i] for i in idx], dtype=torch.float32, device=device)
 
-                # normalise advantages per batch (standard PPO practice)
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
                 loss, mets = ppo_loss(
                     model, features, masks, action_ids, old_logp, advantages, returns,
                     clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
@@ -244,17 +304,26 @@ def train_ppo(
                     metrics_accum[k] = metrics_accum.get(k, 0.0) + v
                 updates += 1
 
+        global_step += total_steps
         epoch_metrics = {k: v / max(updates, 1) for k, v in metrics_accum.items()}
         epoch_metrics.update(
             {
                 "epoch": epoch,
+                "global_step": global_step,
                 "mean_reward": sum(episode_rewards) / max(len(episode_rewards), 1),
                 "mean_return": sum(returns_sum) / max(len(returns_sum), 1),
                 "steps": total_steps,
+                "target_steps": steps_per_epoch,
                 "illegal_rate": illegal_total / max(total_steps, 1),
+                "advantage_mean": advantage_mean,
+                "advantage_std": advantage_std,
+                "episode_count": episode_count,
+                "episode_length": episode_length,
             }
         )
         history.append(epoch_metrics)
+        if on_epoch_end is not None:
+            on_epoch_end(epoch, epoch_metrics)
         if epoch % log_interval_epochs == 0:
             log.info(
                 "epoch %d policy_loss=%.4f value_loss=%.4f entropy=%.4f mean_reward=%.4f illegal_rate=%.4f",
@@ -269,11 +338,14 @@ def train_ppo(
 
 
 __all__ = [
+    "approx_kl",
     "attribute_step_rewards",
+    "clip_fraction",
     "clipped_surrogate",
     "collect_trajectory",
     "compute_gae",
     "flush_terminal_rewards",
+    "init_ppo_from_bc",
     "ppo_loss",
     "train_ppo",
 ]

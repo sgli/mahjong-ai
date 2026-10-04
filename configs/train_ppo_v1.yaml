@@ -1,0 +1,39 @@
+# PPO v1 Pilot config (Phase 10.2 §16). 起点超参，非最终最优。
+
+checkpoint_dir: "experiments/ppo_v1"
+bc_checkpoint: "experiments/bc_v2.1/checkpoints/best.pt"
+
+dataset_version: "decision-v2"
+feature_version: "feature-v1"
+action_schema_version: "action-v1"
+environment_version: "tenhou-v2-rl"   # Phase 10.2 §9：RL 环境版本
+reward_version: "reward-v1"
+model_version: "ppo-v1"
+
+model:
+  hidden_sizes: [256, 256]
+
+training:
+  seed: 42
+  env_seed: 42
+  device: "cuda"
+
+  num_envs: 4
+  epochs: 5
+  steps_per_epoch: 5000
+
+  batch_size: 1024
+  update_epochs: 4
+
+  gamma: 0.99
+  lam: 0.95
+  clip_eps: 0.2
+
+  vf_coef: 0.5
+  ent_coef: 0.01
+  lr: 0.0001
+
+  max_episode_steps: 5000
+
+evaluation:
+  games: 1000

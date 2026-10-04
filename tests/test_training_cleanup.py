@@ -32,16 +32,18 @@ def _obs():
 
 # -- item 1: pending reward flush ---------------------------------------------
 def test_flush_terminal_rewards_flushes_pending_and_placement():
-    traj = {s: {"rewards": []} for s in range(4)}
+    from mahjong.training import TrajectoryBuffer, TrajectoryStep
+
+    traj = {s: TrajectoryBuffer() for s in range(4)}
     for s in range(4):
-        traj[s]["rewards"].append(0.0)
+        traj[s].append(TrajectoryStep(features=None, action_id=0, legal_mask=None, old_log_prob=0.0, value=0.0, reward=0.0, done=False))
     pending = {0: 0.0, 1: 2.5, 2: 0.0, 3: -1.0}
     flush_terminal_rewards(_FakeEnv(), traj, pending)
     # pending added to the seat's last transition, then placement bonus
-    assert traj[0]["rewards"][-1] == 2.0  # 0 + rank0 bonus
-    assert traj[1]["rewards"][-1] == 2.5 + 1.0  # pending + rank1 bonus
-    assert traj[2]["rewards"][-1] == -1.0  # rank2 bonus
-    assert traj[3]["rewards"][-1] == -1.0 + -2.0  # pending + rank3 bonus
+    assert traj[0].steps[-1].reward == 2.0  # 0 + rank0 bonus
+    assert traj[1].steps[-1].reward == 2.5 + 1.0  # pending + rank1 bonus
+    assert traj[2].steps[-1].reward == -1.0  # rank2 bonus
+    assert traj[3].steps[-1].reward == -1.0 + -2.0  # pending + rank3 bonus
     assert all(pending[s] == 0.0 for s in range(4))
 
 

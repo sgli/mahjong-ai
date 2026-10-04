@@ -38,13 +38,49 @@ class Opponent:
         raise NotImplementedError
 
 
-def load_policy(checkpoint: str | Path, device: str | torch.device = "cpu") -> tuple[ObservationEncoder, MLPPolicy]:
-    """Load an encoder + policy (with value head) from a Phase 5/7 checkpoint."""
+def _is_ppo_checkpoint_file(path: Path) -> bool:
+    """True if ``path`` is a PPO training checkpoint (``checkpoint_type == "ppo"``)."""
+    if not path.is_file():
+        return False
+    try:
+        payload = torch.load(path, map_location="cpu")
+    except Exception:
+        return False
+    return isinstance(payload, dict) and (
+        payload.get("checkpoint_type") == "ppo" or "model_state_dict" in payload
+    )
+
+
+def load_policy(
+    checkpoint: str | Path,
+    device: str | torch.device = "cpu",
+    checkpoint_type: str | None = None,
+) -> tuple[ObservationEncoder, MLPPolicy]:
+    """Load an encoder + policy from a BC or PPO checkpoint.
+
+    - ``checkpoint_type="ppo"``（或文件为 PPO checkpoint）→ ``model_state_dict`` 直接构造
+      ``MLPPolicy``（含 value head；``strict=False`` 兼容缺 value head 的旧权重）。
+    - 否则走既有 BC 路径（``load_checkpoint`` + ``remap_bc_state_dict``，保持不变）。
+    """
     path = Path(checkpoint)
+    encoder = ObservationEncoder()
+
+    if checkpoint_type == "ppo" or (checkpoint_type is None and _is_ppo_checkpoint_file(path)):
+        from ..training.ppo_checkpoint import load_ppo_checkpoint
+
+        ckpt = load_ppo_checkpoint(path, map_location="cpu")
+        state = ckpt.get("model_state_dict") or {}
+        hidden = tuple((ckpt.get("config") or {}).get("model", {}).get("hidden_sizes", [128, 128]))
+        model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden)
+        model.load_state_dict(state, strict=False)
+        model.to(device)
+        model.eval()
+        return encoder, model
+
+    # BC 路径（保持不变）
     checkpoint_dir = path.parent if path.is_file() else path
     ckpt = load_checkpoint(checkpoint_dir)
     hidden = tuple(ckpt.get("config", {}).get("model", {}).get("hidden_sizes", [128, 128]))
-    encoder = ObservationEncoder()
     model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden)
     model.load_state_dict(remap_bc_state_dict(ckpt["state_dict"]), strict=False)
     model.to(device)
@@ -77,6 +113,7 @@ class PolicyOpponent(Opponent):
         config: dict | None = None,
         device: str | torch.device = "cpu",
         mode: str = "sampling",
+        checkpoint_type: str | None = None,
     ):
         super().__init__(
             opponent_id=opponent_id,
@@ -89,7 +126,7 @@ class PolicyOpponent(Opponent):
             raise ValueError(f"mode must be greedy|sampling, got {mode!r}")
         self.device = torch.device(device)
         self.mode = mode
-        self.encoder, self.model = load_policy(checkpoint, self.device)
+        self.encoder, self.model = load_policy(checkpoint, self.device, checkpoint_type=checkpoint_type)
 
     def decide(self, observation, legal_actions: list, rng: random.Random):
         actions = [a for a in legal_actions if isinstance(a, Action)]

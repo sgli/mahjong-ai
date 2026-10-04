@@ -18,8 +18,8 @@ Design / assumptions (Tenhou):
 - Exhaustive draw (荒牌流局) settles tenpai/noten (3000 + 300*honba, split).
 - Kyuushu kyuuhai (九種九牌) is exposed as the special string action
   ``"kyuushu_kyuuhai"`` on a non-dealer's first draw with >= 9 distinct
-  terminals/honours.  Four-wind / four-kan / four-riichi aborts are **not**
-  implemented.
+  terminals/honours.  Four-wind / four-kan / four-riichi aborts are implemented
+  (``RulesConfig`` flags + ``_check_*_abort``; see tests/test_environment_aborts.py).
 - West round (西入): after South 4, if no player has >= 30000 points, a West
   round is played.
 """
@@ -55,6 +55,11 @@ from .wall import Wall
 
 SEAT_WINDS = ("E", "S", "W", "N")
 KYUUSHU_ACTION = "kyuushu_kyuuhai"
+
+#: RL environment version (Phase 10.2 §9). Distinct from ``RulesConfig.rules_id``
+#: (tenhou-v1) — this string identifies the *Environment* wiring used for RL,
+#: and is written into configs / checkpoints / experiments / benchmarks.
+ENVIRONMENT_VERSION = "tenhou-v2-rl"
 
 
 @dataclass
@@ -346,11 +351,12 @@ class MahjongEnv:
         if action.type is ActionType.RIICHI:
             p.riichi = True
             p.score -= 1000
+            state.scores[seat] -= 1000  # 立直棒立即结算：同步 state.scores（修复 t81 待决策 bug）
             state.kyotaku += 1
             state.stats[seat].riichi_count += 1
             self._discard_tile(seat, action.tile, close_ippatsu=False)
             p.ippatsu = True
-            return {}
+            return {seat: -self.reward_config.score_delta_scale * 1000}
         if action.type is ActionType.TSUMO:
             return self._resolve_tsumo(seat)
         if action.type is ActionType.KAN:
@@ -454,7 +460,9 @@ class MahjongEnv:
         else:
             if self._check_four_riichi_abort() or self._check_four_wind_abort():
                 return self._resolve_ryukyoku(abort=True)
-            self._draw_for((discarder + 1) % 4)
+            result = self._draw_for((discarder + 1) % 4)
+            if result is not None:
+                return result
         return {}
 
     def _apply_call(self, seat: int, action: Action, discarder: int) -> dict:
@@ -530,13 +538,13 @@ class MahjongEnv:
         return all(s.scores[seat] >= s.scores[i] for i in range(4))
 
     # -- drawing ----------------------------------------------------------------
-    def _draw_for(self, seat: int) -> None:
+    def _draw_for(self, seat: int) -> dict | None:
         state = self.state
         p = state.players[seat]
         state.first_draw_done[seat] = True
         if state.wall.remaining == 0:
-            self._resolve_ryukyoku(abort=False)
-            return
+            # 荒牌流局：返回结算 rewards（修复：之前被调用方丢弃，导致 reward 缺失）
+            return self._resolve_ryukyoku(abort=False)
         tile = state.wall.draw()
         p.hand.append(tile)
         p.hand.sort()
@@ -545,6 +553,7 @@ class MahjongEnv:
         p.temporary_furiten = False  # 临时振听在下一次摸牌后解除
         state.turn = seat
         state.phase = PHASE_DISCARD
+        return None
 
     def _kan_draw_for(self, seat: int) -> None:
         state = self.state

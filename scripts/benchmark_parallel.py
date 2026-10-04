@@ -34,6 +34,8 @@ def _bench_worker(task: tuple) -> list[dict]:
         base_seed,
         candidate_checkpoint,
         candidate_mode,
+        candidate_type,
+        candidate_version,
         opponent_type,
         opponent_checkpoint,
     ) = task
@@ -44,17 +46,18 @@ def _bench_worker(task: tuple) -> list[dict]:
 
     candidate = PolicyOpponent(
         opponent_id="candidate",
-        type="bc",
-        model_version="candidate",
+        type=candidate_type,
+        model_version=candidate_version,
         checkpoint=candidate_checkpoint,
         mode=candidate_mode,
+        checkpoint_type="ppo" if candidate_type == "ppo" else None,
     )
     if opponent_type == "random":
         opps = [RandomOpponent(opponent_id="random", model_version="random-v1") for _ in range(3)]
     elif opponent_type == "rule":
         opps = [RuleOpponent(opponent_id="rule", model_version="rule-v1") for _ in range(3)]
-    elif opponent_type in ("bc_v1", "bc_v2"):
-        version = "bc-v1" if opponent_type == "bc_v1" else "bc-v2"
+    elif opponent_type in ("bc_v1", "bc_v2", "bc_v2_1"):
+        version = {"bc_v1": "bc-v1", "bc_v2": "bc-v2", "bc_v2_1": "bc-v2.1"}[opponent_type]
         opps = [
             PolicyOpponent(
                 opponent_id=opponent_type,
@@ -123,6 +126,8 @@ def run_matchup(
     num_workers: int,
     candidate_checkpoint: str,
     candidate_mode: str,
+    candidate_type: str,
+    candidate_version: str,
     opponent_checkpoint: str,
 ) -> tuple[list[dict], float]:
     import concurrent.futures
@@ -137,7 +142,7 @@ def run_matchup(
         futures = [
             pool.submit(
                 _bench_worker,
-                (chunk, base_seed, candidate_checkpoint, candidate_mode, opponent_type, opponent_checkpoint),
+                (chunk, base_seed, candidate_checkpoint, candidate_mode, candidate_type, candidate_version, opponent_type, opponent_checkpoint),
             )
             for chunk in chunks
         ]
@@ -150,11 +155,14 @@ def run_matchup(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Parallel BC benchmark (Phase 10.1.1-D).")
-    ap.add_argument("--candidate", default="experiments/bc_v2.1/checkpoints", help="candidate checkpoint dir")
+    ap.add_argument("--candidate", default="experiments/bc_v2.1/checkpoints", help="candidate checkpoint dir/file")
     ap.add_argument("--candidate-mode", default="sampling", choices=["greedy", "sampling"])
-    ap.add_argument("--opponents", default="random", help="comma list: random,bc_v1,rule,bc_v2")
+    ap.add_argument("--candidate-type", default="bc", choices=["bc", "ppo"], help="candidate checkpoint type (bc/ppo)")
+    ap.add_argument("--candidate-version", default="candidate", help="candidate model_version label")
+    ap.add_argument("--opponents", default="random", help="comma list: random,bc_v1,rule,bc_v2,bc_v2_1")
     ap.add_argument("--bc-v1-checkpoint", default="experiments/exp_0001/checkpoint")
     ap.add_argument("--bc-v2-opponent", default=None, help="bc-v2 checkpoint path (enables 'bc_v2' opponent)")
+    ap.add_argument("--bc-v2.1-checkpoint", default="experiments/bc_v2.1/checkpoints", help="bc-v2.1 checkpoint path (enables 'bc_v2_1' opponent)")
     ap.add_argument("--games-per-opponent", type=int, default=5000, help="games per opponent type (each matchup)")
     ap.add_argument("--num-workers", type=int, default=16)
     ap.add_argument("--seed", type=int, default=42)
@@ -164,17 +172,26 @@ def main(argv: list[str] | None = None) -> int:
     candidate_path = str(Path(args.candidate).resolve())
     bc_v1_path = str(Path(args.bc_v1_checkpoint).resolve())
     bc_v2_path = str(Path(args.bc_v2_opponent).resolve()) if args.bc_v2_opponent else None
+    bc_v21_path = str(Path(getattr(args, "bc_v2.1_checkpoint")).resolve())
 
     opponent_types = [s.strip() for s in args.opponents.split(",") if s.strip()]
-    checkpoint_for = {"random": None, "rule": None, "bc_v1": bc_v1_path, "bc_v2": bc_v2_path}
+    checkpoint_for = {
+        "random": None,
+        "rule": None,
+        "bc_v1": bc_v1_path,
+        "bc_v2": bc_v2_path,
+        "bc_v2_1": bc_v21_path,
+    }
     for ot in opponent_types:
         if ot not in checkpoint_for:
-            raise SystemExit(f"unknown opponent type {ot!r} (choose from random,bc_v1,rule,bc_v2)")
+            raise SystemExit(f"unknown opponent type {ot!r} (choose from random,bc_v1,rule,bc_v2,bc_v2_1)")
         if ot == "bc_v2" and not bc_v2_path:
             raise SystemExit("--bc-v2-opponent is required when opponent 'bc_v2' is requested")
 
     report = {
         "candidate": args.candidate,
+        "candidate_type": args.candidate_type,
+        "candidate_version": args.candidate_version,
         "candidate_mode": args.candidate_mode,
         "seed": args.seed,
         "num_workers": args.num_workers,
@@ -192,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
             num_workers=args.num_workers,
             candidate_checkpoint=candidate_path,
             candidate_mode=args.candidate_mode,
+            candidate_type=args.candidate_type,
+            candidate_version=args.candidate_version,
             opponent_checkpoint=checkpoint_for[ot],
         )
         total_elapsed += elapsed

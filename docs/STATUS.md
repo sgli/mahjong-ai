@@ -25,22 +25,33 @@
   - 评估：**val acc 0.69788 / test acc 0.69782**（val≈test，无过拟合）
   - Benchmark：**30000 局**（greedy/sampling × random/bc-v1/rule × 5000 局/对手），全部占优
   - **未做**：E 数据质量（69 例 replay error 分类，按用户决定放弃）
+- **Phase 10.2**：PPO / RL 闭环验证与 Pilot（见 `docs/PHASE10.2_RESULT.md`）
+  - **门禁**：§4–§16 全部 P0/P1 实现并配 regression test；**独立门禁审计 PASS**（reviewer 自行复跑确认无弱断言、无 §3 违规）
+  - 修复 **2 个真实 bug**：荒牌流局 deltas 丢失、立直棒结算缺失（均配回归测试；`validate_rules` 匹配率无回归）
+  - **Pilot-A/B/C**（target 2k/5k/10k，实际 **2,371 / 6,964 / 10,891** steps）：**全部健康**（全指标 finite、无 NaN/Inf、`illegal_rate=0`、env 正常结束、checkpoint/resume 正常）
+  - **Benchmark 12000 局**：PPO-v1 对 random / rule 占优；对 BC-v2.1 greedy 略优、**sampling 落败**（如实记录，符合 §32 定位）
+  - **判定：PASS**（§28 DoD 逐条通过）→ 允许进入 Phase 10.3（**需用户决定**，§31.11 不得自动进入）
 
 ## 最新 commit
 
+- `118ce32`（Phase 10.1.1 STATUS 更新）
 - `828c715`（Phase 10.1.1：训练基础设施优化 + bc-v2.1 + 30000 局 Benchmark）
-- `80fa706`（Phase 10.1：decision-v2 + bc-v2 + 10000 局 Benchmark）
+- Phase 10.2 全套见 git log 最新提交
 
 ## 版本
 
 | 项 | 值 |
 |---|---|
 | 数据版本（dataset_version） | `decision-v2`（大规模）；`decision-v1`（早期 baseline） |
-| feature/action schema 版本 | `feature-v1`（action `action-v1`） |
-| 模型版本 | **`bc-v2.1`**（`experiments/bc_v2.1/checkpoints`，best = epoch 2）；`bc-v2`；`bc-v1`（`experiments/exp_0001/checkpoint`） |
+| feature/action schema 版本 | `feature-v1` / `action-v1`（270 actions） |
+| Environment 版本 | **`tenhou-v2-rl`**（RL 用，Phase 10.2 §9 固定） |
+| Reward 版本 | **`reward-v1`**（0.001×score_delta + placement [2,1,−1,−2]） |
+| 模型版本 | **`ppo-v1`**（`experiments/ppo_v1`，Pilot-C 10,891 steps）；**`bc-v2.1`**（`experiments/bc_v2.1/checkpoints`，best = epoch 2）；`bc-v2`；`bc-v1` |
 | 数据源 | 天凤 / 雀魂 `.mjai.json`（全量 ~226 万文件） |
 
 ## 关键指标
+
+### BC
 
 | 模型 | 训练 | val acc | test acc |
 |---|---|---|---|
@@ -48,33 +59,45 @@
 | bc-v2 | decision-v2 全量 1 epoch | 0.6792 | — |
 | **bc-v2.1** | decision-v2 全量 5 epoch（best = epoch 2） | **0.69788** | **0.69782** |
 
-Benchmark（bc-v2.1，每对手 5000 局，candidate mean_rank 越低越好）：
+### BC-v2.1 Benchmark（每对手 5000 局，candidate mean_rank 越低越好）
 
 | 模式 | vs random | vs bc-v1 | vs rule |
 |---|---|---|---|
 | greedy | 0.0008 | 0.1586 | 0.9198 |
 | sampling | 0.0064 | 0.3648 | 1.3374 |
 
+### PPO-v1 Pilot（全指标 finite，illegal_rate 0）
+
+| Pilot | target / 实际 steps | policy_loss | value_loss | entropy | approx_kl | clip_fraction |
+|---|---|---|---|---|---|---|
+| A | 2,000 / 2,371 | −0.00034 | 4.09 | 0.2775 | 0.00209 | 0.0092 |
+| B | 5,000 / 6,964 | −0.00120 | 7.43 | 0.2766 | 0.00458 | 0.0265 |
+| C | 10,000 / 10,891 | −0.00058 | 7.09 | 0.2812 | 0.00645 | 0.0456 |
+
+### PPO-v1 Benchmark（每对手 2000 局，candidate mean_rank）
+
+| 模式 | vs random | vs rule | vs BC-v2.1 |
+|---|---|---|---|
+| greedy | 0.0020 | 0.6185 | 1.0750 |
+| sampling | 0.0150 | 1.1360 | **1.7315** ⚠️（正面对抗落败） |
+
 ## 下一阶段目标
 
-- **可选训练**：按已验证的收敛结论，**2 epoch 全量重训已足够**；如需进一步提速可考虑预编码特征缓存；更大模型/更大 batch 待评估；
-- **RL（PPO）阶段**：当前暂缓，需用户确认后再进入；
-- 遗留：E 数据质量（69 例 replay error 分类）已放弃。
+- **Phase 10.3（大规模 PPO / Self-play）**：需**用户确认**后启动（§31.11 不得自动进入）；
+- 进入前建议优先处理：**R1** PPO 对 BC 的增益验证（当前 sampling 正面对抗 BC-v2.1 落败）、**R3** 多 seed、**R4** rollout 吞吐（并行 env / vectorized）、**R2** `double_yakuman` 未接线；
+- 遗留（已知、非阻塞）：E 数据质量（69 例 replay error 分类）放弃；profiler `gpu_util` 为 None（需外部 nvidia-smi）。
 
 ## 检查状态
 
-**Phase 10.1**
-- [x] feature version 统一（`feature-v1`）
-- [x] dataset manifest + validation（`docs/DATASET_VALIDATION_REPORT.md`）
-- [x] BC 全量训练（bc-v2）+ checkpoint
-- [x] Benchmark ≥10000 局（`docs/BENCHMARK_BC_V2_REPORT.md`）
+**Phase 10.1 / 10.1.1** —— 已完成（见 `docs/PHASE10.1_RESULT.md`、`docs/PHASE10.1.1_RESULT.md`）
 
-**Phase 10.1.1**
-- [x] Fast Encoder bitwise 等价（old == fast，4096 行 `torch.equal`）
-- [x] 吞吐达标（§23 目标 ≥50k / 理想 75k–100k+ → 实测 261k–645k）
-- [x] Resume 正确恢复（epoch/global_step/optimizer/RNG）
-- [x] `latest.pt` / `best.pt` 存在且可加载
-- [x] Learning curve（小规模 3 epoch + 全量 5 epoch）
-- [x] 完整 val + test 评估（`scripts/evaluate_bc.py`）
-- [x] Benchmark Greedy/Sampling + Rule baseline + 双端指标（30000 局）
-- [ ] E 数据质量（69 例错误分类）—— **放弃**
+**Phase 10.2（§28 DoD）** —— 全部通过
+- [x] bc-v2.1 best.pt 加载；PPO trunk/action head 与 BC 严格一致（bitwise）；value head 重初始化
+- [x] Environment regression PASS；Replay↔Environment 交叉验证 PASS（3581 点 0 mismatch）；environment_version 明确
+- [x] reward-v1 明确；reward attribution / terminal reward regression PASS（§10.1 八条均有真实数值断言）
+- [x] GAE / PPO ratio / PPO clipping regression PASS
+- [x] trajectory schema 明确（`ppo_buffer.py` 并接入 rollout）；PPO metrics 完整（14 项）；approx_kl / clip_fraction 已实现；advantage normalization 语义固定（rollout-wide）
+- [x] PPO checkpoint 完整（含 optimizer/RNG/metadata）；PPO resume PASS（Run A == Run B，bitwise）；fixed seed reproducibility PASS
+- [x] Pilot-A / B / C PASS；无 NaN/Inf；`illegal_rate = 0`；Environment 无异常终止；checkpoint 可加载；resume 可继续
+- [x] PPO Benchmark 完成（12000 局）；BC-v2.1 / PPO / Rule / Random 对比完成；Greedy + Sampling 均完成
+- [x] `docs/PHASE10.2.md` 已保存；`docs/PHASE10.2_RESULT.md` 已生成；`STATUS.md` 已更新
