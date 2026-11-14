@@ -22,6 +22,7 @@ class GameResult:
     illegal_actions: int
     stats: list[dict] = field(default_factory=list)  # per-seat SeatStats as dicts
     error: str | None = None
+    completed: bool = True
 
 
 def run_game(
@@ -58,11 +59,12 @@ def run_game(
         seed=seed,
         opponents={s: f"{opponents[s].opponent_id}@{opponents[s].model_version}" for s in range(4)},
         final_scores=list(env.state.scores),
-        final_ranks=list(env.state.final_ranks or [0, 1, 2, 3]),
+        final_ranks=list(env.state.final_ranks or []),
         steps=steps,
         illegal_actions=illegal,
         stats=[asdict(st) for st in env.state.stats],
         error=error,
+        completed=env.done() and env.state.final_ranks is not None,
     )
 
 
@@ -86,6 +88,9 @@ def run_round(
 
 def summarize(results: list[GameResult]) -> dict:
     """Aggregate final ranks / scores / illegal rate across games."""
+    from .validation import validate_game_rows
+    validate_game_rows([{"seed": r.seed, "completed": r.completed, "error": r.error,
+                         "final_ranks": r.final_ranks, "illegal_actions": r.illegal_actions} for r in results])
     n = len(results)
     total_illegal = sum(r.illegal_actions for r in results)
     total_steps = sum(r.steps for r in results)

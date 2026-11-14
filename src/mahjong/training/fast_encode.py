@@ -10,17 +10,22 @@ tree.  It must be bitwise identical to ``ObservationEncoder.encode`` +
 from __future__ import annotations
 
 import json
-
 import numpy as np
 import torch
 
 from ..features.action_space import ACTION_SPACE_SIZE, action_dict_to_id
 from ..features.encoder import FEATURE_DIM, _WINDS
+from ..features.action_space_v2 import ACTION_SPACE_SIZE_V2, action_dict_to_id_v2
+from ..features.encoder_v2 import FEATURE_DIM_V2, MAX_OPPONENT_RIVER, GLOBAL_DIM_V2
 from ..rules.tiles import RED_FIVE, TILE_TO_INDEX
 
 _TILE_IDX: dict[str, int] = dict(TILE_TO_INDEX)
 for _r, _b in RED_FIVE.items():
     _TILE_IDX[_r] = TILE_TO_INDEX[_b]
+_RED_TILE_IDX = {tile: index for index, tile in enumerate(("5mr", "5pr", "5sr"))}
+_TILE_IDX_V2 = dict(_TILE_IDX)
+_TILE_IDX_V2.update({tile: 34 + index for tile, index in _RED_TILE_IDX.items()})
+
 
 _BLOCKS = 6  # hand / melds / opponents melds / own discards / opp discards / dora
 
@@ -188,8 +193,118 @@ def encode_record_batch_fast(rb) -> tuple[torch.Tensor, torch.Tensor, torch.Tens
     return torch.from_numpy(feats), torch.from_numpy(action_ids), torch.from_numpy(masks)
 
 
+def _tile_idx_v2(tile: str) -> int:
+    return _TILE_IDX_V2[tile]
+
+
+def _add_v2_counts(dst: np.ndarray, tiles, offset: int, *, base_counts: bool = False) -> None:
+    if not tiles:
+        return
+    for tile in tiles:
+        idx = _TILE_IDX[tile] if base_counts else _tile_idx_v2(tile)
+        dst[offset + idx] += 1.0
+        if base_counts and tile in _RED_TILE_IDX:
+            # Base count plus a separate aka count within this 37-wide block.
+            red_idx = _RED_TILE_IDX[tile]
+            dst[offset + 34 + red_idx] += 1.0
+
+
+def _meld_tiles_json(melds: list) -> list[str]:
+    return [tile for meld in melds for tile in meld["tiles"]]
+
+
+def encode_record_batch_fast_v2(rb, *, compact_transport: bool = False):
+    """Fast columnar conversion to feature-v2/action-v2 training tensors.
+
+    ``compact_transport`` stores the integral feature prefix as uint8 and emits
+    the 30 floating global features separately. Training reconstructs the exact
+    float32 feature tensor on the GPU; this cuts DataLoader IPC/pinned-memory
+    traffic by roughly 4x without quantizing model inputs.
+    """
+    cols = {name: rb.column(name).to_pylist() for name in (
+        "hand", "player_id", "melds", "opponents_melds", "discards", "dora_markers",
+        "scores", "riichi", "bakaze", "kyoku", "honba", "kyotaku", "oya", "turn",
+        "action_type", "action_tile", "action_consumed", "action_kan_kind", "legal_actions",
+    )}
+    batch_size = len(cols["hand"])
+    feats = np.zeros(
+        (batch_size, FEATURE_DIM_V2),
+        dtype=np.uint8 if compact_transport else np.float32,
+    )
+    global_features = np.zeros((batch_size, GLOBAL_DIM_V2), dtype=np.float32) if compact_transport else None
+    masks = np.zeros((batch_size, ACTION_SPACE_SIZE_V2), dtype=np.bool_)
+    labels = np.empty(batch_size, dtype=np.int64)
+    # Blocks: hand(37), own meld(37), three opponent melds(111), own river(37),
+    # three opponent histograms(111), ordered rivers(3*128*37), dora(34), globals(30).
+    off_hand = 0
+    off_own_meld = 37
+    off_opp_meld = 74
+    off_own_river = 185
+    off_opp_river = 222
+    off_sequence = 333
+    off_dora = off_sequence + 3 * MAX_OPPONENT_RIVER * 37
+    off_global = off_dora + 34
+    for i in range(batch_size):
+        seat = int(cols["player_id"][i])
+        _add_v2_counts(feats[i], cols["hand"][i], off_hand, base_counts=True)
+        own_melds = json.loads(cols["melds"][i])
+        _add_v2_counts(feats[i], _meld_tiles_json(own_melds), off_own_meld, base_counts=True)
+        all_melds = json.loads(cols["opponents_melds"][i])
+        relative_seats = ((seat + 1) % 4, (seat + 2) % 4, (seat + 3) % 4)
+        for rel, abs_seat in enumerate(relative_seats):
+            tiles = _meld_tiles_json(all_melds[abs_seat])
+            _add_v2_counts(feats[i], tiles, off_opp_meld + rel * 37, base_counts=True)
+
+        rivers = json.loads(cols["discards"][i])
+        _add_v2_counts(feats[i], rivers[seat], off_own_river)
+        for rel, abs_seat in enumerate(relative_seats):
+            river = rivers[abs_seat]
+            if len(river) > MAX_OPPONENT_RIVER:
+                raise ValueError(f"river overflow in parquet batch: {len(river)} > {MAX_OPPONENT_RIVER}")
+            _add_v2_counts(feats[i], river, off_opp_river + rel * 37)
+            seq_base = off_sequence + rel * MAX_OPPONENT_RIVER * 37
+            for pos, tile in enumerate(river):
+                feats[i, seq_base + pos * 37 + _tile_idx_v2(tile)] = 1.0
+
+        for tile in cols["dora_markers"][i]:
+            feats[i, off_dora + _TILE_IDX[tile]] += 1.0
+        global_row = global_features[i] if compact_transport else feats[i, off_global:off_global + GLOBAL_DIM_V2]
+        global_row[_WINDS[cols["bakaze"][i]]] = 1.0
+        global_row[4 + int(cols["kyoku"][i]) - 1] = 1.0
+        global_row[8] = float(cols["honba"][i])
+        global_row[9] = float(cols["kyotaku"][i])
+        global_row[10 + int(cols["oya"][i])] = 1.0
+        global_row[14 + int(cols["turn"][i])] = 1.0
+        global_row[18 + seat] = 1.0
+        for j, score in enumerate(cols["scores"][i]):
+            global_row[22 + j] = float(score) / 1000.0
+        for j, riichi in enumerate(cols["riichi"][i]):
+            global_row[26 + j] = float(bool(riichi))
+
+        label_action = {
+            "type": cols["action_type"][i], "tile": cols["action_tile"][i],
+            "consumed": cols["action_consumed"][i] or [], "kan_kind": cols["action_kan_kind"][i],
+        }
+        labels[i] = action_dict_to_id_v2(label_action)
+        for action in json.loads(cols["legal_actions"][i]):
+            if action["type"] == "kyuushu_kyuuhai":
+                continue  # no supervised kyuushu examples in this source dataset
+            masks[i, action_dict_to_id_v2(action)] = True
+
+    globals_view = global_features if compact_transport else feats[:, off_global:]
+    if not np.isfinite(globals_view).all():
+        raise ValueError("non-finite feature-v2 global features")
+    if not masks[np.arange(batch_size), labels].all():
+        raise ValueError("gold label absent from feature-v2 legal mask")
+    result = (torch.from_numpy(feats), torch.from_numpy(labels), torch.from_numpy(masks))
+    if compact_transport:
+        return (*result, torch.from_numpy(global_features))
+    return result
+
+
 __all__ = [
     "encode_record_batch_fast",
+    "encode_record_batch_fast_v2",
     "encode_row_fast",
     "encode_rows_fast",
 ]

@@ -119,6 +119,7 @@ def save_training_checkpoint(
     metrics: dict,
     scaler_state: dict | None = None,
     rng_states: dict | None = None,
+    best_epoch: int | None = None,
 ) -> Path:
     """Save the full training state (resume-capable)."""
     p = Path(path)
@@ -127,6 +128,7 @@ def save_training_checkpoint(
         "state_dict": model_state_dict,
         "optimizer_state_dict": optimizer_state_dict,
         "epoch": epoch,
+        "best_epoch": best_epoch,
         "global_step": global_step,
         "best_val_loss": best_val_loss,
         "best_val_accuracy": best_val_accuracy,
@@ -137,7 +139,9 @@ def save_training_checkpoint(
         "rng_state_torch_cuda": (rng_states or {}).get("rng_state_torch_cuda"),
         "scaler_state": scaler_state,
     }
-    torch.save(payload, p)
+    temporary = p.with_name(p.name + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(p)
     return p
 
 

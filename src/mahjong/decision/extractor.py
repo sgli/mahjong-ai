@@ -19,7 +19,7 @@ from collections.abc import Iterator, Sequence
 
 from ..parser.events import Event
 from ..replay.state import ReplayState
-from ..rules.legal import chankan_legal_actions, discard_legal_actions, response_legal_actions
+from ..rules.legal import LEGAL_MASK_VERSION, chankan_legal_actions, discard_legal_actions, response_legal_actions
 from .action import Action, ActionType
 from .decision import DecisionPoint, DecisionSample
 from .observation import PlayerObservation
@@ -52,11 +52,33 @@ class DecisionExtractor:
     ) -> Iterator[DecisionSample]:
         """Yield decision samples; ``states[i]`` must be the state after
         ``events[i]`` (as produced by ``ReplayEngine.replay``)."""
-        n = min(len(states), len(events))
+        if len(states) != len(events):
+            raise ValueError("replay state/event lengths differ")
+        self._temporary_furiten = [False] * 4
+        self._riichi_furiten = [False] * 4
+        self._draws = 0
+        self._rinshan = False
+        n = len(events)
         for i in range(n):
             event = events[i]
+            self._current_event = event
             state = states[i]
             et = event.type.value
+            if et == "start_kyoku":
+                self._temporary_furiten = [False] * 4
+                self._riichi_furiten = [False] * 4
+                self._draws = 0
+            if et == "tsumo":
+                self._draws += 1
+                self._temporary_furiten[event.actor] = False
+                previous = i - 1
+                while previous >= 0 and events[previous].type.value == "dora":
+                    previous -= 1
+                self._rinshan = previous >= 0 and events[previous].type.value in ("ankan", "kakan", "daiminkan")
+            if et == "dahai":
+                # A called chi/pon turn has no self-draw; the caller's own
+                # discard still ends same-turn furiten (Tenhou rules).
+                self._temporary_furiten[event.actor] = False
 
             if et == "tsumo":
                 yield from self._discard_decision(state, event, i, events, drawn_tile=event.pai)
@@ -92,6 +114,9 @@ class DecisionExtractor:
             riichi=ps.riichi,
             score=ps.score,
             drawn_tile=drawn_tile,
+            round_wind=state.bakaze, seat_wind="ESWN"[(actor - state.oya) % 4],
+            ippatsu=ps.ippatsu, is_rinshan=self._rinshan,
+            is_haitei=self._draws >= 70, wall_remaining=70 - self._draws,
         )
         legal = self._normalise_legal(legal)
         yield self._make_sample(state, actor, "discard", i, legal, human)
@@ -146,6 +171,9 @@ class DecisionExtractor:
                 claimed_tile=claimed_tile,
                 discarder=discarder,
                 is_next=(seat == (discarder + 1) % 4),
+                round_wind=state.bakaze, seat_wind="ESWN"[(seat - state.oya) % 4],
+                ippatsu=ps.ippatsu, is_houtei=self._draws >= 70,
+                temporary_furiten=self._temporary_furiten[seat], riichi_furiten=self._riichi_furiten[seat],
             )
             legal = self._normalise_legal(legal)
             human = acted.get(seat, _PASS)
@@ -154,6 +182,9 @@ class DecisionExtractor:
             # (more than PASS) or actually took a non-PASS action.
             if len(legal) > 1 or human.type is not ActionType.PASS:
                 yield self._make_sample(state, seat, "response", i, legal, human)
+                if human.type is ActionType.PASS and any(a.type is ActionType.RON for a in legal):
+                    self._temporary_furiten[seat] = True
+                    self._riichi_furiten[seat] |= ps.riichi
 
     def _resolve_responses(self, i, events) -> dict[int, Action]:
         """Map responder seat -> non-PASS action (for those who acted)."""
@@ -216,11 +247,17 @@ class DecisionExtractor:
                 own_discards=ps.discards,
                 added_tile=added_tile,
                 kan_declarer=declarer,
+                riichi=ps.riichi, round_wind=state.bakaze, seat_wind="ESWN"[(seat - state.oya) % 4],
+                ippatsu=ps.ippatsu, temporary_furiten=self._temporary_furiten[seat],
+                riichi_furiten=self._riichi_furiten[seat],
             )
             legal = self._normalise_legal(legal)
             human = acted.get(seat, _PASS)
             if len(legal) > 1 or human.type is not ActionType.PASS:
                 yield self._make_sample(state, seat, "response", i, legal, human)
+                if human.type is ActionType.PASS and any(a.type is ActionType.RON for a in legal):
+                    self._temporary_furiten[seat] = True
+                    self._riichi_furiten[seat] |= ps.riichi
 
     # -- shared -----------------------------------------------------------------
     def _normalise_legal(self, legal: list[Action]) -> tuple[Action, ...]:
@@ -234,6 +271,18 @@ class DecisionExtractor:
             )
         observation = PlayerObservation.from_state(state, seat)
         point = DecisionPoint(round_id=state.round_id, seat=seat, kind=kind, step=step)
+        event = self._current_event
+        context = {
+            "round_wind": state.bakaze, "seat_wind": "ESWN"[(seat - state.oya) % 4],
+            "ippatsu": state.players[seat].ippatsu,
+            "temporary_furiten": self._temporary_furiten[seat],
+            "riichi_furiten": self._riichi_furiten[seat],
+            "wall_remaining": 70 - self._draws, "is_rinshan": self._rinshan,
+            "drawn_tile": event.pai if event.type.value == "tsumo" else None,
+            "claimed_tile": event.pai if kind == "response" else None,
+            "discarder": event.actor if kind == "response" else None,
+            "is_chankan": event.type.value == "kakan",
+        }
         return DecisionSample(
             game_id=state.game_id or self.game_id,
             round_id=state.round_id,
@@ -241,6 +290,6 @@ class DecisionExtractor:
             observation=observation,
             legal_actions=legal,
             action=human,
-            metadata={"kind": kind},
+            metadata={"kind": kind, "legal_mask_version": LEGAL_MASK_VERSION, "legal_context": context},
             decision_point=point,
         )

@@ -39,6 +39,7 @@ from .yaku import (
     _wait_type,
     _wait_types,
     compute_yaku,
+    winning_interpretations,
 )
 
 
@@ -70,12 +71,15 @@ def _compute_fu(structure, ctx: WinContext, wait_type: str | None = None) -> int
     if ctx.is_tsumo and not is_pinfu:
         fu += 2  # tsumo (pinfu tsumo is fixed 20)
 
-    for g in structure.sets:
+    for index, g in enumerate(structure.sets):
         if g.kind == "run":
             continue
         terminal = _is_terminal_or_honor(g.tiles[0])
         # 荣和完成双碰的刻子按明刻计符（和牌张来自他家）
-        ron_completed = not ctx.is_tsumo and normalize(ctx.win_tile) in g.tiles
+        ron_completed = not ctx.is_tsumo and g.kind == "triplet" and (
+            index == structure.winning_group if structure.winning_group is not None
+            else normalize(ctx.win_tile) in g.tiles and wait_type in (None, "shanpon")
+        )
         if g.kind == "triplet":
             if g.open or ron_completed:
                 fu += 4 if terminal else 2
@@ -260,9 +264,9 @@ def score_hand(
     if is_standard_agari(hand, melds):
         for structure in iter_structures(hand, melds):
             # 高点法：番数与符数来自同一分解、同一和牌张归属；枚举每种听牌形解释
-            for wt in _wait_types(structure, win_tile):
-                yr = compute_yaku(structure, context, wait_type=wt, double_yakuman=double_yakuman)
-                fu = _compute_fu(structure, context, wait_type=wt)
+            for assigned, wt in winning_interpretations(structure, win_tile):
+                yr = compute_yaku(assigned, context, wait_type=wt, double_yakuman=double_yakuman)
+                fu = _compute_fu(assigned, context, wait_type=wt)
                 if yr.yakuman:
                     candidates.append(
                         ScoreResult(
@@ -281,8 +285,9 @@ def score_hand(
 
     assert candidates, "hand is not a winning hand"
     # 高点法：先比基本点，同点取高符（如 3番40符 与 4番20符 同点时取 3番40符）
+    legal_candidates = [candidate for candidate in candidates if candidate.has_yaku]
     return max(
-        candidates,
+        legal_candidates or candidates,
         key=lambda r: (int(r.is_yakuman), r.yakuman_count, r.base_points, r.fu),
     )
 

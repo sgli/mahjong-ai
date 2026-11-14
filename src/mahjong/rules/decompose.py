@@ -25,6 +25,7 @@ class Group:
 class Structure:
     sets: tuple[Group, ...]  # exactly 4 groups
     pair: str  # base tile of the pair
+    winning_group: int | None = None  # -1: pair; otherwise index in sets
 
 
 def _first_nonzero(counts) -> int:

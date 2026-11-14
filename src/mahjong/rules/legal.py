@@ -17,6 +17,19 @@ from itertools import combinations
 from ..decision.action import Action, ActionType
 from .agari import is_agari, is_furiten, is_tenpai, shanten
 from .tiles import normalize, rank_of, suit_of
+from .scoring import score_hand
+from .yaku import WinContext
+
+LEGAL_MASK_VERSION = "mask-v2-yaku-context"
+
+
+def _has_yaku(hand, melds, tile, *, riichi=False, is_tsumo=False,
+              round_wind="", seat_wind="", ippatsu=False, **flags):
+    # Unknown winds confer no wind yaku. Dataset extraction always supplies them.
+    context = WinContext(round_wind, seat_wind, tile, is_tsumo=is_tsumo,
+                         is_menzen=all(m.kind == "ankan" for m in melds),
+                         is_riichi=riichi, is_ippatsu=ippatsu, **flags)
+    return score_hand(hand, melds, tile, context).has_yaku
 
 
 def _group_by_value(tiles) -> dict[str, list[str]]:
@@ -146,7 +159,9 @@ def can_riichi(hand, melds, score: int) -> bool:
 
 
 # -- assembled legal action sets ----------------------------------------------
-def discard_legal_actions(*, hand, melds, riichi: bool, score: int, drawn_tile: str | None = None) -> list[Action]:
+def discard_legal_actions(*, hand, melds, riichi: bool, score: int, drawn_tile: str | None = None,
+                          round_wind="", seat_wind="", ippatsu=False,
+                          is_rinshan=False, is_haitei=False, wall_remaining=None) -> list[Action]:
     """Legal actions for a discard decision.
 
     ``drawn_tile`` distinguishes the two discard windows:
@@ -168,7 +183,7 @@ def discard_legal_actions(*, hand, melds, riichi: bool, score: int, drawn_tile: 
     else:
         for tile in distinct:
             actions.append(Action(ActionType.DISCARD, tile=tile))
-        if is_draw and can_riichi(hand, melds, score):
+        if is_draw and can_riichi(hand, melds, score) and (wall_remaining is None or wall_remaining >= 4):
             # Riichi requires the hand *after* the discard to be tenpai.  Only
             # compute the per-tile tenpai checks when the post-draw hand is
             # already tenpai-or-better (shanten <= 0); a hand with shanten >= 1
@@ -179,7 +194,9 @@ def discard_legal_actions(*, hand, melds, riichi: bool, score: int, drawn_tile: 
                         actions.append(Action(ActionType.RIICHI, tile=tile))
 
     if is_draw:
-        if is_agari(hand, melds):
+        if is_agari(hand, melds) and _has_yaku(hand, melds, drawn_tile, riichi=riichi, is_tsumo=True,
+                round_wind=round_wind, seat_wind=seat_wind, ippatsu=ippatsu,
+                is_rinshan=is_rinshan, is_haitei=is_haitei):
             actions.append(Action(ActionType.TSUMO))
         actions.extend(ankan_actions(hand))
         actions.extend(kakan_actions(hand, melds))
@@ -193,6 +210,8 @@ def chankan_legal_actions(
     own_discards,
     added_tile: str,
     kan_declarer: int,
+    riichi=False, round_wind="", seat_wind="", ippatsu=False,
+    temporary_furiten=False, riichi_furiten=False,
 ) -> list[Action]:
     """Legal actions when another player adds a tile via kakan (chankan).
 
@@ -200,7 +219,10 @@ def chankan_legal_actions(
     called for chi/pon/kan.
     """
     actions: list[Action] = []
-    if is_agari(list(hand) + [added_tile], melds) and not is_furiten(hand, melds, own_discards):
+    if (not temporary_furiten and not riichi_furiten and is_agari(list(hand) + [added_tile], melds)
+            and not is_furiten(hand, melds, own_discards)
+            and _has_yaku(list(hand) + [added_tile], melds, added_tile, riichi=riichi,
+                          round_wind=round_wind, seat_wind=seat_wind, ippatsu=ippatsu, is_chankan=True)):
         actions.append(Action(ActionType.RON, target=kan_declarer))
     actions.append(Action(ActionType.PASS))
     return actions
@@ -215,11 +237,16 @@ def response_legal_actions(
     claimed_tile: str,
     discarder: int,
     is_next: bool,
+    round_wind="", seat_wind="", ippatsu=False, is_houtei=False,
+    temporary_furiten=False, riichi_furiten=False,
 ) -> list[Action]:
     """Legal actions when another player discarded ``claimed_tile``."""
     actions: list[Action] = []
 
-    if is_agari(list(hand) + [claimed_tile], melds) and not is_furiten(hand, melds, own_discards):
+    if (not temporary_furiten and not riichi_furiten and is_agari(list(hand) + [claimed_tile], melds)
+            and not is_furiten(hand, melds, own_discards)
+            and _has_yaku(list(hand) + [claimed_tile], melds, claimed_tile, riichi=riichi,
+                          round_wind=round_wind, seat_wind=seat_wind, ippatsu=ippatsu, is_houtei=is_houtei)):
         actions.append(Action(ActionType.RON, target=discarder))
 
     if not riichi and len(melds) < 4:

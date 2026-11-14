@@ -3,8 +3,7 @@
 
 Usage::
 
-    python scripts/selfplay.py --config configs/selfplay.yaml
-    python scripts/selfplay.py --games 3 --seed 1 --matches all_random ppo_vs_random
+    python scripts/selfplay.py --config <selfplay-config.yaml>
 """
 
 from __future__ import annotations
@@ -27,9 +26,6 @@ import yaml  # noqa: E402
 from mahjong.evaluation import OpponentPool, PolicyOpponent, RandomOpponent, run_round, summarize  # noqa: E402
 
 log = logging.getLogger("selfplay")
-
-_DEFAULT_CONFIG = _HERE.parent / "configs" / "selfplay.yaml"
-
 
 def _load_config(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
@@ -61,7 +57,7 @@ def _build_pool(pool_cfg: dict, device: str) -> OpponentPool:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Self-play matches between pool opponents.")
-    ap.add_argument("--config", default=str(_DEFAULT_CONFIG))
+    ap.add_argument("--config", type=Path, required=True, help="self-play YAML config")
     ap.add_argument("--games", type=int, help="override games per match")
     ap.add_argument("--seed", type=int, help="override seed")
     ap.add_argument("--matches", nargs="*", help="only run these match names")

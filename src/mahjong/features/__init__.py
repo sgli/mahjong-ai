@@ -14,6 +14,8 @@ __all__ = [
     "FEATURE_DIM",
     "FEATURE_VERSION",
     "ObservationEncoder",
+    "FEATURE_DIM_V3",
+    "ObservationEncoderV3",
     "action_from_id",
     "action_to_id",
     "canonical_action",
@@ -29,4 +31,8 @@ def __getattr__(name):
         from . import encoder
 
         return getattr(encoder, name)
+    if name in ("FEATURE_DIM_V3", "ObservationEncoderV3", "encode_observation_v3"):
+        from . import encoder_v3
+
+        return getattr(encoder_v3, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

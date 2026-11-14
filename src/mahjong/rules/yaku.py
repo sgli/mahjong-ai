@@ -20,7 +20,7 @@ Notes / assumptions (Tenhou):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .tiles import normalize, rank_of, suit_of
 
@@ -145,6 +145,27 @@ def _wait_types(structure, win_tile: str) -> list[str]:
     return seen or ["ryanmen"]
 
 
+def winning_interpretations(structure, win_tile: str):
+    """Assign the winning tile to a concealed group, never to an existing kan."""
+    w = normalize(win_tile)
+    if structure.pair == w:
+        yield replace(structure, winning_group=-1), "tanki"
+    for index, group in enumerate(structure.sets):
+        if group.open or group.kind == "quad" or w not in group.tiles:
+            continue
+        if group.kind == "triplet":
+            wait = "shanpon"
+        else:
+            a, b, c = sorted(group.tiles)
+            if w == b:
+                wait = "kanchan"
+            elif w == a:
+                wait = "penchan" if a.startswith("7") else "ryanmen"
+            else:
+                wait = "penchan" if c.startswith("3") else "ryanmen"
+        yield replace(structure, winning_group=index), wait
+
+
 def _is_pinfu(structure, ctx: WinContext, wait_type: str | None = None) -> bool:
     if not ctx.is_menzen:
         return False
@@ -207,10 +228,13 @@ def compute_yaku(structure, ctx: WinContext, wait_type: str | None = None, doubl
     # 暗刻 = 三张均出自自己手牌；荣和完成双碰时含和牌张的那组刻子不算暗刻
     closed_triplets = [
         g.tiles[0]
-        for g in structure.sets
+        for index, g in enumerate(structure.sets)
         if g.kind in ("triplet", "quad")
         and not g.open
-        and (ctx.is_tsumo or normalize(ctx.win_tile) not in g.tiles)
+        and (ctx.is_tsumo or (
+            index != structure.winning_group if structure.winning_group is not None
+            else g.kind == "quad" or normalize(ctx.win_tile) not in g.tiles
+        ))
     ]
     quads = [g for g in structure.sets if g.kind == "quad"]
     run_sigs = sorted((suit_of(g.tiles[0]), rank_of(g.tiles[0])) for g in structure.sets if g.kind == "run")

@@ -15,10 +15,19 @@ import benchmark_parallel as bp  # noqa: E402
 
 def test_defaults_opponent_mode_temperature():
     args = bp._build_parser().parse_args([])
-    assert args.opponent_mode == "sampling"
+    assert args.opponent_mode == "greedy"
     assert args.opponent_temperature == 1.0
-    assert args.candidate_mode == "sampling"
+    assert args.candidate_mode == "greedy"
     assert args.candidate_temperature == 1.0
+    assert args.opponents == "bc_v3"
+
+
+def test_bc_v21_directory_resolves_to_best_checkpoint():
+    directory = Path("experiments/bc_v2.1/checkpoints")
+    if not (directory / "best.pt").is_file():
+        return
+    assert Path(bp._effective_checkpoint(str(directory))) == (directory / "best.pt").resolve()
+    assert len(bp._sha256(str(directory))) == 64
 
 
 def test_metadata_roundtrip():

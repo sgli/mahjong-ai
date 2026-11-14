@@ -1,6 +1,6 @@
 """Versioned action schema (DATA_SPEC section 6).
 
-Eight action types are supported.  ``Action`` is an immutable dataclass; the
+Eight legacy action types plus typed kyuushu are supported. ``Action`` is an immutable dataclass; the
 ``consumed`` tuple is normalised to sorted order in ``__post_init__`` so two
 semantically identical actions compare equal regardless of the order the tiles
 were listed in the source event.
@@ -11,9 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-#: Version of the action schema.  Bump whenever the action representation
-#: changes so datasets can record which schema produced them.
+#: Legacy action schema version. V2 datasets/checkpoints record their schema
+#: version explicitly while sharing this typed action object.
 ACTION_SCHEMA_VERSION = "action-v1"
+ACTION_SCHEMA_VERSION_V2 = "action-v2"
 
 
 class ActionType(str, Enum):
@@ -25,6 +26,7 @@ class ActionType(str, Enum):
     RON = "ron"
     TSUMO = "tsumo"
     PASS = "pass"
+    KYUUSHU_KYUHAI = "kyuushu_kyuuhai"
 
 
 #: Kan sub-kinds carried by ``Action.kan_kind`` for ``ActionType.KAN``.
@@ -59,9 +61,9 @@ class Action:
         if self.kan_kind is not None and self.kan_kind not in KAN_KINDS:
             raise ValueError(f"invalid kan_kind {self.kan_kind!r}")
 
-    def to_dict(self) -> dict:
+    def to_dict(self, schema_version: str = ACTION_SCHEMA_VERSION) -> dict:
         return {
-            "schema_version": ACTION_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "type": self.type.value,
             "tile": self.tile,
             "consumed": list(self.consumed),

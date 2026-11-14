@@ -74,7 +74,7 @@ def test_illegal_discard_tile_rejected():
 
 
 def test_environment_version_fixed():
-    assert ENVIRONMENT_VERSION == "tenhou-v2-rl"
+    assert ENVIRONMENT_VERSION == "tenhou-v3-ron-context"
 
 
 def test_rules_config_wiring():

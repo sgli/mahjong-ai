@@ -47,6 +47,8 @@ def build_manifest(
         "config": config,
         "counts": counts,
     }
+    from ..rules.legal import LEGAL_MASK_VERSION
+    manifest["legal_mask_version"] = LEGAL_MASK_VERSION
     if rules is not None:
         manifest["rules"] = rules
     return manifest

@@ -14,6 +14,18 @@ def test_single_step_terminal():
     assert torch.allclose(torch.tensor(ret), torch.tensor([1.0]), atol=1e-6)
 
 
+def test_nonterminal_rollout_cut_bootstraps_last_value():
+    adv, ret = compute_gae([1.0], [0.5], [False], gamma=0.9, lam=1.0, last_value=2.0)
+    assert torch.allclose(torch.tensor(adv), torch.tensor([2.3]), atol=1e-6)
+    assert torch.allclose(torch.tensor(ret), torch.tensor([2.8]), atol=1e-6)
+
+
+def test_terminal_rollout_ignores_bootstrap_value():
+    adv, ret = compute_gae([1.0], [0.5], [True], gamma=0.9, lam=1.0, last_value=2.0)
+    assert torch.allclose(torch.tensor(adv), torch.tensor([0.5]), atol=1e-6)
+    assert torch.allclose(torch.tensor(ret), torch.tensor([1.0]), atol=1e-6)
+
+
 def test_terminal_bootstrap_zero():
     # after a terminal step, next_value must be 0 (no leakage)
     adv, ret = compute_gae([1.0, 1.0], [0.5, 0.5], [False, True], gamma=1.0, lam=1.0)

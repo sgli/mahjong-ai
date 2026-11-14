@@ -134,6 +134,7 @@ def test_riichi_deducts_score_and_adds_kyotaku():
     p = env.state.players[0]
     p.hand = sorted(["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5p", "5p"])
     p.drawn_this_turn = True
+    p.last_drawn = "5p"
     p.score = 25000
     env.state.turn = 0
     env.state.phase = PHASE_DISCARD

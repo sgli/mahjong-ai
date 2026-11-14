@@ -15,6 +15,13 @@ from mahjong.features import (
     encode_observation,
     legal_mask,
 )
+from mahjong.features.action_space_v2 import (
+    ACTION_SPACE_SIZE_V2,
+    action_from_id_v2,
+    action_to_id_v2,
+    legal_mask_v2,
+)
+from mahjong.features.encoder_v2 import FEATURE_DIM_V2, ObservationEncoderV2
 
 
 def _obs(**overrides):
@@ -118,3 +125,47 @@ def test_encoder_only_reads_observation_fields():
     allowed = {f.name for f in dataclasses.fields(PlayerObservation)}
     assert probe.accessed <= allowed
     assert not {"opponents_hands", "wall", "ura_markers"} & probe.accessed
+
+
+def test_action_v2_distinguishes_red_five_roles_and_roundtrips():
+    normal = Action(ActionType.DISCARD, tile="5m")
+    red = Action(ActionType.DISCARD, tile="5mr")
+    assert action_to_id_v2(normal) != action_to_id_v2(red)
+    assert action_from_id_v2(action_to_id_v2(red)) == red
+
+    normal_pon = Action(ActionType.PON, tile="5m", consumed=("5m", "5m"))
+    red_pon = Action(ActionType.PON, tile="5m", consumed=("5m", "5mr"))
+    assert action_to_id_v2(normal_pon) != action_to_id_v2(red_pon)
+    assert action_from_id_v2(action_to_id_v2(red_pon)) == red_pon
+    assert ACTION_SPACE_SIZE_V2 > ACTION_SPACE_SIZE
+    assert action_from_id_v2(ACTION_SPACE_SIZE_V2 - 1).type is ActionType.KYUUSHU_KYUHAI
+
+
+def test_action_v2_has_typed_kyuushu_id_and_mask_gate():
+    action = Action(ActionType.KYUUSHU_KYUHAI)
+    assert action_from_id_v2(action_to_id_v2(action)) == action
+    assert not legal_mask_v2([action]).any()
+    assert legal_mask_v2([action], allow_kyuushu=True)[action_to_id_v2(action)]
+    for action_id in range(ACTION_SPACE_SIZE_V2):
+        assert action_to_id_v2(action_from_id_v2(action_id)) == action_id
+
+
+def test_feature_v2_preserves_red_tile_and_relative_river_order():
+    encoder = ObservationEncoderV2()
+    normal = _obs(hand=("5m",), discards=((), ("1m", "2m"), (), ()))
+    red = _obs(hand=("5mr",), discards=((), ("1m", "2m"), (), ()))
+    changed_order = _obs(hand=("5mr",), discards=((), ("2m", "1m"), (), ()))
+    normal_features = encoder.encode(normal)
+    red_features = encoder.encode(red)
+    order_features = encoder.encode(changed_order)
+    assert normal_features.shape == (FEATURE_DIM_V2,)
+    assert not torch.equal(normal_features, red_features)
+    assert not torch.equal(red_features, order_features)
+
+
+def test_feature_v2_rejects_river_overflow_instead_of_truncating():
+    import pytest
+
+    obs = _obs(discards=((), tuple(["1m"] * 129), (), ()))
+    with pytest.raises(ValueError, match="limit is 128"):
+        ObservationEncoderV2().encode(obs)

@@ -315,6 +315,10 @@ def test_extractor_chankan_ron_after_kakan():
         Dahai(actor=1, pai="9p", tsumogiri=False),
         Pon(actor=0, target=1, pai="9p", consumed=("9p", "9p")),
         Dahai(actor=0, pai="1m", tsumogiri=False),
+        # Seat 2 previously passed a legal ron on 9p: draw before robbing
+        # the later kan to clear temporary furiten.
+        Tsumo(actor=2, pai="6s"),
+        Dahai(actor=2, pai="6s", tsumogiri=True),
         Tsumo(actor=0, pai="3m"),
         Kakan(actor=0, pai="9p", consumed=("9p", "9p", "9p")),
         Hora(actor=2, target=0, deltas=(-8000, 0, 8000, 0), ura_markers=()),

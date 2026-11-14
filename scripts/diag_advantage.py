@@ -30,118 +30,64 @@ def _device(spec):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu") if spec == "auto" else torch.device(spec)
 
 
+def _correlation(a, b):
+    if len(a) < 2 or len(a) != len(b):
+        return None
+    x, y = torch.tensor(a, dtype=torch.float64), torch.tensor(b, dtype=torch.float64)
+    if not bool(x.var() > 0) or not bool(y.var() > 0):
+        return None
+    return float(torch.corrcoef(torch.stack((x, y)))[0, 1])
+
+
 def audit(checkpoint, device, *, games=4, max_steps=20000, gamma=0.99, lam=0.95):
-    _, model = load_policy(checkpoint, device)
+    encoder, model = load_policy(checkpoint, device)
     model.eval()
-    encoder = ObservationEncoder()
-
-    all_values = []
-    all_returns = []
-    # per-seat-episode: mean advantage, final rank, final score
-    ep_adv_mean = []
-    ep_rank = []
-    ep_score = []
-
+    episodes = []
     for g in range(games):
         env = MahjongEnv(seed=g)
-        traj, steps, illegal = collect_trajectory(env, model, encoder, device, max_steps=max_steps, rng_seed=0, env_index=0, rng_version="rng-v1")
-        if illegal:
-            continue
-        ranks = env.state.final_ranks if env.done() else None
-        scores = env.state.scores
-        for s in range(4):
-            buf = traj[s]
+        traj, steps, illegal = collect_trajectory(env, model, encoder, device, max_steps=max_steps, rng_seed=g, env_index=0, rng_version="rng-v2")
+        if illegal or not env.done():
+            raise ValueError(f"diagnostic game {g} incomplete/illegal; no unpaired statistics emitted")
+        for seat in range(4):
+            buf = traj[seat]
             if not buf.steps:
                 continue
             rewards = [st.reward for st in buf.steps]
             values = [st.value for st in buf.steps]
             dones = [st.done for st in buf.steps]
             adv, ret = compute_gae(rewards, values, dones, gamma, lam)
-            all_values.extend(values)
-            all_returns.extend(ret)
-            ep_adv_mean.append(sum(adv) / len(adv))
-            if ranks is not None:
-                ep_rank.append(ranks[s])
-            ep_score.append(scores[s])
-
-    vq = value_quality_metrics(torch.tensor(all_values), torch.tensor(all_returns))
-
-    # advantage between/within variance
-    n_eps = len(ep_adv_mean)
-    grand_mean = sum(ep_adv_mean) / max(n_eps, 1)
-    var_between = sum((m - grand_mean) ** 2 for m in ep_adv_mean) / max(n_eps, 1)
-    # within：用 all advantage 的总方差 − between（近似）
-    all_adv = []
-    # 重新收集 all advantage（简便：用 return-value 近似 = advantage）
-    for g in range(games):
-        env = MahjongEnv(seed=g)
-        traj, steps, illegal = collect_trajectory(env, model, encoder, device, max_steps=max_steps, rng_seed=0, env_index=0, rng_version="rng-v1")
-        for s in range(4):
-            buf = traj[s]
-            if not buf.steps:
-                continue
-            rewards = [st.reward for st in buf.steps]
-            values = [st.value for st in buf.steps]
-            dones = [st.done for st in buf.steps]
-            adv, ret = compute_gae(rewards, values, dones, gamma, lam)
-            all_adv.extend(adv)
-
-    all_adv_t = torch.tensor(all_adv)
-    var_total = float(all_adv_t.var(unbiased=False).item())
-    var_within = max(0.0, var_total - var_between)
-
-    # advantage vs final result correlation + sign accuracy
-    corr_adv_rank = None
-    sign_acc = None
-    if ep_rank and len(ep_rank) == n_eps:
-        adv_t = torch.tensor(ep_adv_mean)
-        rank_t = torch.tensor(ep_rank, dtype=torch.float32)
-        corr_adv_rank = float(torch.corrcoef(torch.stack([adv_t, rank_t]))[0, 1].item())
-        median = rank_t.median().item()
-        pos = adv_t > 0
-        if pos.any():
-            sign_acc = float((rank_t[pos] < median).float().mean().item())  # advantage>0 且 rank 更优(<median) 的比例
-
-    # constant baseline: 用全局均值 return 替代 value，重算 advantage 的相关性
-    const_val = float(torch.tensor(all_returns).mean().item())
-    const_adv = [r - const_val for r in all_returns]
-    # 简化：常数基线的 advantage 相关性（用 return 相对全局均值）
-    corr_const = None
-    if ep_rank:
-        # 每 seat-episode 的 mean(const_adv) 与 rank
-        ep_const = []
-        idx = 0
-        for g in range(games):
-            env = MahjongEnv(seed=g)
-            traj, steps, illegal = collect_trajectory(env, model, encoder, device, max_steps=max_steps, rng_seed=0, env_index=0, rng_version="rng-v1")
-            for s in range(4):
-                buf = traj[s]
-                if not buf.steps:
-                    continue
-                rewards = [st.reward for st in buf.steps]
-                values = [st.value for st in buf.steps]
-                dones = [st.done for st in buf.steps]
-                adv, ret = compute_gae(rewards, values, dones, gamma, lam)
-                # 常数基线 advantage = return - const_val
-                cadv = [r - const_val for r in ret]
-                ep_const.append(sum(cadv) / len(cadv))
-        if ep_const:
-            cc_t = torch.tensor(ep_const)
-            corr_const = float(torch.corrcoef(torch.stack([cc_t, torch.tensor(ep_rank, dtype=torch.float32)]))[0, 1].item())
-
+            episodes.append({"seed": g, "seat": seat, "rewards": rewards, "values": values,
+                             "dones": dones, "adv": adv, "returns": ret, "rank": env.state.final_ranks[seat]})
+    if not episodes:
+        raise ValueError("diagnostic has no trajectories")
+    all_values = [v for ep in episodes for v in ep["values"]]
+    all_returns = [v for ep in episodes for v in ep["returns"]]
+    all_adv = [v for ep in episodes for v in ep["adv"]]
+    count = len(all_adv)
+    grand_mean = sum(all_adv) / count
+    ep_means = [sum(ep["adv"]) / len(ep["adv"]) for ep in episodes]
+    var_total = sum((v - grand_mean) ** 2 for v in all_adv) / count
+    var_between = sum(len(ep["adv"]) * (mean - grand_mean) ** 2 for ep, mean in zip(episodes, ep_means)) / count
+    var_within = sum(sum((v - mean) ** 2 for v in ep["adv"]) for ep, mean in zip(episodes, ep_means)) / count
+    const_val = sum(all_returns) / len(all_returns)
+    const_means = []
+    for ep in episodes:
+        cadv, _ = compute_gae(ep["rewards"], [const_val] * len(ep["rewards"]), ep["dones"], gamma, lam)
+        const_means.append(sum(cadv) / len(cadv))
+    ranks = [ep["rank"] for ep in episodes]
+    median = torch.tensor(ranks, dtype=torch.float32).median().item()
+    positive = [rank < median for mean, rank in zip(ep_means, ranks) if mean > 0]
     return {
-        "checkpoint": checkpoint,
-        "games": games,
-        "samples": len(all_values),
-        "value_quality": {k: round(v, 4) for k, v in vq.items()},
+        "checkpoint": str(checkpoint), "games": games, "samples": count,
+        "diagnostic_version": "paired-trajectories-v2",
+        "episode_keys": [[ep["seed"], ep["seat"]] for ep in episodes],
+        "value_quality": value_quality_metrics(torch.tensor(all_values), torch.tensor(all_returns)),
         "advantage": {
-            "var_total": round(var_total, 4),
-            "var_between_episodes": round(var_between, 4),
-            "var_within": round(var_within, 4),
-            "between_share": round(var_between / max(var_total, 1e-12), 4),
-            "corr_adv_vs_rank": round(corr_adv_rank, 4) if corr_adv_rank is not None else None,
-            "sign_accuracy_adv_pos": round(sign_acc, 4) if sign_acc is not None else None,
-            "corr_const_baseline_vs_rank": round(corr_const, 4) if corr_const is not None else None,
+            "var_total": var_total, "var_between_episodes": var_between, "var_within": var_within,
+            "between_share": var_between / var_total if var_total else 0.0,
+            "corr_adv_vs_rank": _correlation(ep_means, ranks),
+            "sign_accuracy_adv_pos": sum(positive) / len(positive) if positive else None,
+            "corr_const_baseline_vs_rank": _correlation(const_means, ranks),
         },
     }
 

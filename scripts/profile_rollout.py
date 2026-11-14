@@ -26,7 +26,7 @@ if str(_SRC) not in sys.path:
 
 import torch  # noqa: E402
 
-from mahjong.decision.action import Action  # noqa: E402
+from mahjong.decision.action import Action, ActionType  # noqa: E402
 from mahjong.environment import MahjongEnv  # noqa: E402
 from mahjong.features import ACTION_SPACE_SIZE, FEATURE_DIM, ObservationEncoder  # noqa: E402
 from mahjong.features.action_space import action_to_id, legal_mask  # noqa: E402
@@ -44,7 +44,7 @@ def profile_rollout(model, encoder, env, *, max_steps: int, device: torch.device
     while not env.done() and total_steps < max_steps:
         seat = env.state.turn
         t0 = time.perf_counter()
-        legal = [a for a in env.legal_actions(seat) if isinstance(a, Action)]
+        legal = [a for a in env.legal_actions(seat) if isinstance(a, Action) and a.type is not ActionType.KYUUSHU_KYUHAI]
         t1 = time.perf_counter()
         obs = env.observation(seat)
         features = encoder.encode(obs).to(device)

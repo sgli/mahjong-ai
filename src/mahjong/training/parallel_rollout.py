@@ -14,9 +14,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from ..decision.action import Action
-from ..features.action_space import ACTION_SPACE_SIZE, action_to_id, legal_mask
+from ..decision.action import Action, ActionType
+from ..features.action_space import ACTION_SPACE_SIZE, action_to_id
 from ..features.encoder import FEATURE_DIM, _WINDS, ObservationEncoder
+from ..features.policy_schema import policy_action_ops
 from ..model.policy import MLPPolicy
 from ..rules.tiles import RED_FIVE, TILE_TO_INDEX
 from .ppo import attribute_step_rewards, flush_terminal_rewards
@@ -90,10 +91,15 @@ def collect_batch_trajectory(
     Sampling 使用每 env 独立、确定性播种的 RNG（``base_seed + 100000 * env_index``），
     使每个 env 的动作序列与全局交错顺序无关（可复现）。
     """
+    to_id, make_mask, allow_abort = policy_action_ops(encoder, model)
+    feature_v2_or_v3 = getattr(encoder, "feature_version", "feature-v1") in {
+        "feature-v2", "feature-v3",
+    }
+    versioned_actions = getattr(encoder, "action_schema_version", "action-v1") == "action-v2"
     for env in envs:
         env.reset()
     n = len(envs)
-    generators = [torch.Generator().manual_seed(base_seed + 100_000 * i) for i in range(n)]
+    generators = [torch.Generator(device=device).manual_seed(base_seed + 100_000 * i) for i in range(n)]
     trajs: list[dict[int, TrajectoryBuffer]] = [{s: TrajectoryBuffer() for s in range(4)} for _ in range(n)]
     pendings: list[dict] = [{s: 0.0 for s in range(4)} for _ in range(n)]
     dones = [False] * n
@@ -109,14 +115,17 @@ def collect_batch_trajectory(
         for i in active:
             env = envs[i]
             seat = env.state.turn
-            legal = [a for a in env.legal_actions(seat) if isinstance(a, Action)]
+            legal = [a for a in env.legal_actions(seat) if isinstance(a, Action) and (a.type is not ActionType.KYUUSHU_KYUHAI or allow_abort)]
             legal_list.append(legal)
             seat_list.append(seat)
             obs_list.append(env.observation(seat))
 
-        # §10 批量编码：observations → [N,234] + [N,270]（与逐步 encode 严格一致）
-        feat_batch = encode_observations_batch(obs_list).to(device)
-        mask_batch = legal_mask_batch(legal_list).to(device)
+        # Preserve the optimized v1 encoder; versioned v2/v3 representations
+        # use their canonical observation encoders for this batch.
+        feat_batch = (torch.stack([encoder.encode(obs) for obs in obs_list]) if feature_v2_or_v3
+                      else encode_observations_batch(obs_list)).to(device)
+        mask_batch = (torch.stack([make_mask(legal) for legal in legal_list]) if versioned_actions
+                      else legal_mask_batch(legal_list)).to(device)
         with torch.no_grad():
             out = model(feat_batch, mask_batch)
             log_probs = torch.log_softmax(out.logits, dim=-1)
@@ -134,7 +143,7 @@ def collect_batch_trajectory(
                 aid = int(torch.multinomial(probs_j.unsqueeze(0), 1, generator=generators[i]).squeeze(-1).item())
             if not mask_batch[j][aid].item():
                 illegal += 1  # should never happen (masked argmax/sampling)
-            action = next(a for a in legal if action_to_id(a) == aid)
+            action = next(a for a in legal if to_id(a) == aid)
             rewards, d = env.step(action)
             reward = attribute_step_rewards(rewards, seat, trajs[i], pendings[i])
             trajs[i][seat].append(

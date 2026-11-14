@@ -19,7 +19,11 @@ import torch.nn.functional as F
 from ..dataset.schema import row_to_sample
 from ..features.action_space import action_to_id, legal_mask
 from ..features.encoder import FEATURE_DIM, ObservationEncoder
-from .fast_encode import encode_record_batch_fast, encode_rows_fast
+from ..features.action_space_v2 import action_to_id_v2, legal_mask_v2
+from ..features.encoder_v2 import FEATURE_DIM_V2, ObservationEncoderV2
+from .fast_encode import encode_record_batch_fast, encode_record_batch_fast_v2, encode_rows_fast
+from .fast_encode_v3 import encode_record_batch_fast_v3
+from ..features.encoder_v2 import GLOBAL_DIM_V2
 
 log = logging.getLogger("training.bc")
 
@@ -27,6 +31,10 @@ log = logging.getLogger("training.bc")
 def row_to_tensors(row: dict, encoder: ObservationEncoder):
     sample = row_to_sample(row)
     features = encoder.encode(sample.observation)
+    if getattr(encoder, "feature_version", "feature-v1") == "feature-v2":
+        return features, action_to_id_v2(sample.action), legal_mask_v2(sample.legal_actions)
+    if getattr(encoder, "feature_version", "feature-v1") == "feature-v3":
+        return features, action_to_id_v2(sample.action), legal_mask_v2(sample.legal_actions)
     action_id = action_to_id(sample.action)
     mask = legal_mask(sample.legal_actions)
     return features, action_id, mask
@@ -75,10 +83,17 @@ def iter_batches(
         yield _stack(feat_list, act_list, mask_list, device, pin_memory)
 
 
-def compute_metrics(logits: torch.Tensor, action_ids: torch.Tensor, masks: torch.Tensor) -> dict:
+def compute_metrics(
+    logits: torch.Tensor,
+    action_ids: torch.Tensor,
+    masks: torch.Tensor,
+    *,
+    loss=None,
+    tensor_values: bool = False,
+) -> dict:
     """Metrics for one batch (masked CE loss, accuracy, top-k, illegal mass/rate)."""
     masked = logits.masked_fill(~masks, float("-inf"))
-    loss = F.cross_entropy(masked, action_ids)
+    loss = F.cross_entropy(masked, action_ids) if loss is None else loss.detach()
     masked_probs = torch.softmax(masked, -1)
     pred = masked.argmax(-1)
     accuracy = (pred == action_ids).float().mean()
@@ -96,21 +111,65 @@ def compute_metrics(logits: torch.Tensor, action_ids: torch.Tensor, masks: torch
     pred_legal = masks.gather(-1, pred.unsqueeze(-1)).squeeze(-1)
     illegal_rate = (~pred_legal).float().mean()
 
-    return {
-        "loss": float(loss.item()),
-        "accuracy": float(accuracy.item()),
-        "top3": float(top3.item()),
-        "top5": float(top5.item()),
-        "illegal_prob": float(illegal_prob.item()),
-        "illegal_rate": float(illegal_rate.item()),
+    values = {
+        "loss": loss,
+        "accuracy": accuracy,
+        "top3": top3,
+        "top5": top5,
+        "illegal_prob": illegal_prob,
+        "illegal_rate": illegal_rate,
     }
+    if tensor_values:
+        return {key: value.detach() for key, value in values.items()}
+    return {key: float(value.item()) for key, value in values.items()}
 
 
-def _average(metrics_list) -> dict:
+def _average(metrics_list, weights=None) -> dict:
     if not metrics_list:
         return {}
     keys = metrics_list[0].keys()
-    return {k: sum(m[k] for m in metrics_list) / len(metrics_list) for k in keys}
+    weights = [1] * len(metrics_list) if weights is None else weights
+    if len(weights) != len(metrics_list) or sum(weights) <= 0:
+        raise ValueError("metric weights must match batches and have positive total")
+    return {k: sum(m[k] * w for m, w in zip(metrics_list, weights)) / sum(weights) for k in keys}
+
+
+class MetricAccumulator:
+    """Sample-weighted means with constant storage."""
+
+    def __init__(self):
+        self.count = 0
+        self.totals = {}
+
+    def update(self, metrics, samples):
+        if samples <= 0:
+            raise ValueError("metric batch must contain samples")
+        self.count += samples
+        for key, value in metrics.items():
+            if isinstance(value, torch.Tensor):
+                weighted = value.detach() * samples
+                previous = self.totals.get(key)
+                self.totals[key] = weighted if previous is None else previous + weighted
+            else:
+                self.totals[key] = self.totals.get(key, 0.0) + float(value) * samples
+
+    def compute(self):
+        if not self.count:
+            return {}
+        return {
+            key: float((value / self.count).item()) if isinstance(value, torch.Tensor) else value / self.count
+            for key, value in self.totals.items()
+        }
+
+
+def prepare_bc_batch(batch, device):
+    """Restore transport-only packing to the exact model float32 input."""
+    features, action_ids, masks = batch[:3]
+    features = features.to(device, non_blocking=True)
+    if len(batch) == 4:
+        features = features.to(dtype=torch.float32)
+        features[:, -GLOBAL_DIM_V2:] = batch[3].to(device, non_blocking=True)
+    return features, action_ids.to(device, non_blocking=True), masks.to(device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -124,12 +183,12 @@ def evaluate(
     pin_memory: bool = False,
 ) -> dict:
     model.eval()
-    metrics = []
+    metrics = MetricAccumulator()
     for f, a, m in iter_batches(val_files, encoder, batch_size, device, pin_memory):
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
             out = model(f, m)
-        metrics.append(compute_metrics(out.logits, a, m))
-    return _average(metrics)
+        metrics.update(compute_metrics(out.logits, a, m), len(a))
+    return metrics.compute()
 
 
 def train(
@@ -150,18 +209,20 @@ def train(
     history = []
     for epoch in range(1, epochs + 1):
         model.train()
-        train_metrics = []
+        train_metrics = MetricAccumulator()
         for step, (features, action_ids, masks) in enumerate(
             iter_batches(train_files, encoder, batch_size, device, pin_memory)
         ):
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                 out = model(features, masks)
                 loss = F.cross_entropy(out.logits, action_ids)
+            if not bool(torch.isfinite(loss)):
+                raise ValueError("non-finite BC training loss")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            mets = compute_metrics(out.logits.detach(), action_ids, masks)
-            train_metrics.append(mets)
+            mets = compute_metrics(out.logits.detach(), action_ids, masks, loss=loss)
+            train_metrics.update(mets, len(action_ids))
             if step % log_interval_steps == 0:
                 log.info(
                     "epoch %d step %d loss=%.4f acc=%.4f illegal_rate=%.4f",
@@ -171,7 +232,7 @@ def train(
                     mets["accuracy"],
                     mets["illegal_rate"],
                 )
-        train_avg = _average(train_metrics)
+        train_avg = train_metrics.compute()
         val_avg = evaluate(model, val_files, encoder, batch_size, device, use_amp=use_amp, pin_memory=pin_memory)
         log.info("epoch %d train=%s val=%s", epoch, train_avg, val_avg)
         history.append({"epoch": epoch, "train": train_avg, "val": val_avg})
@@ -209,10 +270,10 @@ def _collate_rows(rows: list[dict], encoder: ObservationEncoder):
     """Top-level collate (picklable for Windows spawn DataLoader workers)."""
     feat, act, mask = [], [], []
     for row in rows:
-        sample = row_to_sample(row)
-        feat.append(encoder.encode(sample.observation))
-        act.append(action_to_id(sample.action))
-        mask.append(legal_mask(sample.legal_actions))
+        f, a, m = row_to_tensors(row, encoder)
+        feat.append(f)
+        act.append(a)
+        mask.append(m)
     features = torch.stack(feat)
     action_ids = torch.tensor(act, dtype=torch.long)
     masks = torch.stack(mask)
@@ -251,14 +312,35 @@ class ParquetBatchDataset(torch.utils.data.IterableDataset):
                 yield record_batch
 
 
-def collate_record_batches(batches) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def collate_record_batches(
+    batches, encoder=None, *, compact_v2_transport: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """Collate one or more Arrow RecordBatches -> (features, action_ids, masks)."""
+    encoder = encoder or ObservationEncoder()
+    if getattr(encoder, "feature_version", "feature-v1") == "feature-v2":
+        encoded = [
+            encode_record_batch_fast_v2(rb, compact_transport=compact_v2_transport)
+            for rb in batches
+        ]
+        # DataLoader uses batch_size=1 because each dataset item is already one
+        # Arrow RecordBatch. Avoid torch.cat's full tensor copy on this hot path;
+        # for feature-v2 one feature tensor is about 114 MiB per 2048-row batch.
+        if len(encoded) == 1:
+            return encoded[0]
+        return tuple(torch.cat([item[i] for item in encoded]) for i in range(len(encoded[0])))
+    if getattr(encoder, "feature_version", "feature-v1") == "feature-v3":
+        encoded = [encode_record_batch_fast_v3(rb) for rb in batches]
+        if len(encoded) == 1:
+            return encoded[0]
+        return tuple(torch.cat([item[i] for item in encoded]) for i in range(3))
     feats, aids, masks = [], [], []
     for rb in batches:
         f, a, m = encode_record_batch_fast(rb)
         feats.append(f)
         aids.append(a)
         masks.append(m)
+    if len(feats) == 1:
+        return feats[0], aids[0], masks[0]
     return torch.cat(feats), torch.cat(aids), torch.cat(masks)
 
 
@@ -285,6 +367,7 @@ def train_dataloader(
     num_workers: int = 0,
     prefetch_factor: int = 4,
     log_interval_steps: int = 50,
+    metric_interval_steps: int = 1,
     use_amp: bool = False,
     start_epoch: int = 0,
     on_epoch_end=None,
@@ -299,7 +382,10 @@ def train_dataloader(
     （同 seed + 同 epoch ⇒ 完全相同顺序，§12）。
     ``val_max_samples`` 非空时，每 epoch 只采样该样本数做快速验证（§13）。
     """
+    if metric_interval_steps <= 0:
+        raise ValueError("metric_interval_steps must be positive")
     history = []
+    compact_v2_transport = getattr(encoder, "feature_version", "feature-v1") == "feature-v2"
     for epoch in range(start_epoch + 1, epochs + 1):
         train_shards_epoch = (
             _shuffle_shards(train_shards, shuffle_seed + epoch) if shuffle_seed is not None else train_shards
@@ -307,39 +393,54 @@ def train_dataloader(
         train_dl = torch.utils.data.DataLoader(
             ParquetBatchDataset(train_shards_epoch, batch_size),
             batch_size=1,
-            collate_fn=collate_record_batches,
+            collate_fn=__import__("functools").partial(
+                collate_record_batches,
+                encoder=encoder,
+                compact_v2_transport=compact_v2_transport,
+            ),
             num_workers=num_workers,
             prefetch_factor=prefetch_factor if num_workers > 0 else None,
             pin_memory=pin_memory and device.type == "cuda",
-            persistent_workers=num_workers > 0,
+            # These loaders are rebuilt each epoch, so retaining their workers
+            # provides no reuse and can keep train + validation pools alive at once.
+            persistent_workers=False,
         )
         val_dl = torch.utils.data.DataLoader(
             ParquetBatchDataset(val_shards, batch_size),
             batch_size=1,
-            collate_fn=collate_record_batches,
+            collate_fn=__import__("functools").partial(
+                collate_record_batches,
+                encoder=encoder,
+                compact_v2_transport=compact_v2_transport,
+            ),
             num_workers=num_workers,
             prefetch_factor=prefetch_factor if num_workers > 0 else None,
             pin_memory=pin_memory and device.type == "cuda",
-            persistent_workers=num_workers > 0,
+            persistent_workers=False,
         )
 
         model.train()
-        train_metrics = []
+        train_metrics = MetricAccumulator()
+        loss_total = None
+        metric_samples = 0
         prof = {"data_time": 0.0, "forward_time": 0.0, "backward_time": 0.0, "optimizer_time": 0.0, "batch_time": 0.0, "samples": 0}
-        batch_start = time.perf_counter()
-        for step, (features, action_ids, masks) in enumerate(train_dl):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        train_wall_start = time.perf_counter()
+        batch_start = train_wall_start
+        for step, batch in enumerate(train_dl):
             data_end = time.perf_counter()
             prof["data_time"] += data_end - batch_start
 
-            features = features.to(device, non_blocking=True)
-            action_ids = action_ids.to(device, non_blocking=True)
-            masks = masks.to(device, non_blocking=True)
+            features, action_ids, masks = prepare_bc_batch(batch, device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                 out = model(features, masks)
                 loss = F.cross_entropy(out.logits, action_ids)
             fwd_end = time.perf_counter()
             prof["forward_time"] += fwd_end - data_end
 
+            if not bool(torch.isfinite(loss)):
+                raise ValueError("non-finite BC training loss")
             optimizer.zero_grad()
             loss.backward()
             bwd_end = time.perf_counter()
@@ -349,45 +450,77 @@ def train_dataloader(
             opt_end = time.perf_counter()
             prof["optimizer_time"] += opt_end - bwd_end
             prof["samples"] += features.shape[0]
+            weighted_loss = loss.detach() * len(action_ids)
+            loss_total = weighted_loss if loss_total is None else loss_total + weighted_loss
 
-            mets = compute_metrics(out.logits.detach(), action_ids, masks)
-            train_metrics.append(mets)
+            collect_metrics = step % metric_interval_steps == 0 or step % log_interval_steps == 0
+            mets = None
+            if collect_metrics:
+                mets = compute_metrics(
+                    out.logits.detach(), action_ids, masks, loss=loss, tensor_values=True
+                )
+                train_metrics.update(mets, len(action_ids))
+                metric_samples += len(action_ids)
             if step % log_interval_steps == 0:
+                log_metrics = {key: float(value.item()) for key, value in mets.items()}
                 log.info(
                     "epoch %d step %d loss=%.4f acc=%.4f illegal_rate=%.4f",
-                    epoch, step, mets["loss"], mets["accuracy"], mets["illegal_rate"],
+                    epoch, step, log_metrics["loss"], log_metrics["accuracy"], log_metrics["illegal_rate"],
                 )
             batch_start = time.perf_counter()
-        prof["batch_time"] = prof["data_time"] + prof["forward_time"] + prof["backward_time"] + prof["optimizer_time"]
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        prof["enqueue_component_time"] = prof["data_time"] + prof["forward_time"] + prof["backward_time"] + prof["optimizer_time"]
+        prof["train_wall_seconds"] = time.perf_counter() - train_wall_start
+        prof["batch_time"] = prof["train_wall_seconds"]
+        prof["timing_version"] = "wall-v3-sampled-metrics"
+        prof["component_timing_note"] = (
+            "component fields are host-side timings; train_wall_seconds includes final CUDA synchronization"
+        )
         prof["samples_per_sec"] = prof["samples"] / prof["batch_time"] if prof["batch_time"] else 0.0
         if device.type == "cuda":
             torch.cuda.synchronize()
             prof["gpu_util"] = None  # nvidia-smi outside python; memory below
             prof["gpu_memory_allocated_mb"] = round(torch.cuda.memory_allocated() / 1024 / 1024, 1)
             prof["gpu_memory_max_allocated_mb"] = round(torch.cuda.max_memory_allocated() / 1024 / 1024, 1)
-        train_avg = _average(train_metrics)
+        train_avg = train_metrics.compute()
+        if loss_total is not None:
+            train_avg["loss"] = float((loss_total / prof["samples"]).item())
+        train_avg["metrics_sampled_samples"] = metric_samples
+        train_avg["metrics_sampled_fraction"] = metric_samples / prof["samples"] if prof["samples"] else 0.0
 
         model.eval()
-        val_metrics = []
+        validation_start = time.perf_counter()
+        val_metrics = MetricAccumulator()
         val_samples = 0
         with torch.no_grad():
-            for features, action_ids, masks in val_dl:
-                features = features.to(device, non_blocking=True)
-                action_ids = action_ids.to(device, non_blocking=True)
-                masks = masks.to(device, non_blocking=True)
+            for batch in val_dl:
+                if val_max_samples is not None:
+                    remaining = val_max_samples - val_samples
+                    if remaining <= 0:
+                        break
+                    batch = tuple(t[:remaining] for t in batch)
+                features, action_ids, masks = prepare_bc_batch(batch, device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                     out = model(features, masks)
-                val_metrics.append(compute_metrics(out.logits, action_ids, masks))
+                val_metrics.update(compute_metrics(out.logits, action_ids, masks), len(action_ids))
                 val_samples += features.shape[0]
                 if val_max_samples is not None and val_samples >= val_max_samples:
                     break
-        val_avg = _average(val_metrics)
+        val_avg = val_metrics.compute()
+        if not val_metrics.count:
+            raise ValueError("validation must contain at least one sample")
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        prof["validation_wall_seconds"] = time.perf_counter() - validation_start
         val_avg["sampled"] = val_samples
         log.info("epoch %d train=%s val=%s profile=%s", epoch, train_avg, val_avg, prof)
         entry = {"epoch": epoch, "train": train_avg, "val": val_avg, "profile": prof}
         history.append(entry)
         if on_epoch_end is not None:
+            checkpoint_start = time.perf_counter()
             on_epoch_end(epoch, train_avg, val_avg, prof)
+            prof["checkpoint_wall_seconds"] = time.perf_counter() - checkpoint_start
     return history
 
 

@@ -3,8 +3,7 @@
 
 Usage::
 
-    python scripts/benchmark.py --config configs/benchmark.yaml
-    python scripts/benchmark.py --games 10 --seed 1
+    python scripts/benchmark.py --config <benchmark-config.yaml>
 """
 
 from __future__ import annotations
@@ -27,9 +26,6 @@ import yaml  # noqa: E402
 from mahjong.evaluation import OpponentPool, PolicyOpponent, RandomOpponent, run_promotion  # noqa: E402
 
 log = logging.getLogger("benchmark")
-
-_DEFAULT_CONFIG = _HERE.parent / "configs" / "benchmark.yaml"
-
 
 def _load_config(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
@@ -60,12 +56,12 @@ def _build_pool(pool_cfg: dict) -> OpponentPool:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Benchmark + promotion flow.")
-    ap.add_argument("--config", default=str(_DEFAULT_CONFIG))
+    ap.add_argument("--config", type=Path, required=True, help="benchmark YAML config")
     ap.add_argument("--games", type=int, help="override benchmark games")
     ap.add_argument("--seed", type=int, help="override seed")
     args = ap.parse_args(argv)
 
-    cfg = _load_config(Path(args.config))
+    cfg = _load_config(args.config)
     games = args.games if args.games is not None else cfg.get("games", 10)
     seed = args.seed if args.seed is not None else cfg.get("seed", 0)
 

@@ -30,7 +30,7 @@ def _result(seed, rank, score, stats):
         seed=seed,
         opponents={0: "c@v1", 1: "r@v1", 2: "r@v1", 3: "r@v1"},
         final_scores=[score, 25000, 25000, 25000],
-        final_ranks=[rank, 0, 1, 2],
+        final_ranks=[rank] + [r for r in range(4) if r != rank],
         steps=100,
         illegal_actions=0,
         stats=stats,

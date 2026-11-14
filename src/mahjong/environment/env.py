@@ -10,14 +10,13 @@ Design / assumptions (Tenhou):
 - Dead wall (14): 5 dora indicators, 5 ura indicators, 4 kan replacements.
 - Riichi requires closed hand + tenpai-after-discard + score >= 1000 + >=4
   wall tiles; the -1000 stick and ``kyotaku += 1`` happen immediately.
-- Ron requires a yaku (``score_hand().has_yaku``) and is blocked by discard
-  furiten.  Temporary furiten (passing a ron) is not modelled.
+- Ron requires a yaku and respects discard, temporary and riichi furiten.
 - Multi-ron uses **atamahane** (the closest seat to the discarder wins); double
   ron is not resolved (but every eligible player still sees RON as legal).
 - Chankan (robbing a kakan) is implemented as a ron-only response window.
 - Exhaustive draw (荒牌流局) settles tenpai/noten (3000 + 300*honba, split).
-- Kyuushu kyuuhai (九種九牌) is exposed as the special string action
-  ``"kyuushu_kyuuhai"`` on a non-dealer's first draw with >= 9 distinct
+- Kyuushu kyuuhai (九種九牌) is exposed as the typed ``Action``
+  ``KYUUSHU_ACTION`` on a non-dealer's first draw with >= 9 distinct
   terminals/honours.  Four-wind / four-kan / four-riichi aborts are implemented
   (``RulesConfig`` flags + ``_check_*_abort``; see tests/test_environment_aborts.py).
 - West round (西入): after South 4, if no player has >= 30000 points, a West
@@ -54,12 +53,12 @@ from .state import (
 from .wall import Wall
 
 SEAT_WINDS = ("E", "S", "W", "N")
-KYUUSHU_ACTION = "kyuushu_kyuuhai"
+KYUUSHU_ACTION = Action(ActionType.KYUUSHU_KYUHAI)
 
 #: RL environment version (Phase 10.2 §9). Distinct from ``RulesConfig.rules_id``
 #: (tenhou-v1) — this string identifies the *Environment* wiring used for RL,
 #: and is written into configs / checkpoints / experiments / benchmarks.
-ENVIRONMENT_VERSION = "tenhou-v2-rl"
+ENVIRONMENT_VERSION = "tenhou-v3-ron-context"
 
 
 @dataclass
@@ -132,13 +131,16 @@ class MahjongEnv:
         for seat in range(4):
             p = state.players[seat]
             n = 14 if seat == state.oya else 13
-            p.hand = sorted(wall.draw() for _ in range(n))
+            dealt = [wall.draw() for _ in range(n)]
+            p.hand = sorted(dealt)
             p.melds = []
             p.discards = []
             p.riichi = False
             p.ippatsu = False
             p.discard_called = False
-            p.last_drawn = None
+            p.temporary_furiten = False
+            p.riichi_furiten = False
+            p.last_drawn = dealt[-1] if seat == state.oya else None
             p.drawn_this_turn = seat == state.oya
 
         state.turn = state.oya
@@ -296,7 +298,7 @@ class MahjongEnv:
         p = self.state.players[seat]
         if seat == discarder:
             return False
-        if p.temporary_furiten:
+        if p.temporary_furiten or p.riichi_furiten:
             return False  # 临时振听：立直见逃后直到下次摸牌前不可荣和
         winning = list(p.hand) + [tile]
         if not is_agari(winning, p.melds):
@@ -370,6 +372,7 @@ class MahjongEnv:
             raise ValueError(f"tile {tile!r} not in hand of seat {seat}")
         _remove_one(p.hand, tile)
         p.discards.append(tile)
+        p.temporary_furiten = False  # own discard ends same-turn furiten, including after chi/pon
         p.last_drawn = None
         p.drawn_this_turn = False
         if close_ippatsu and p.riichi:
@@ -422,9 +425,10 @@ class MahjongEnv:
         state.response_choices[seat] = action
         p = state.players[seat]
         # 临时振听：立直者见逃（可荣却选择不荣）后进入临时振听
-        if p.riichi and getattr(action, "type", None) is not ActionType.RON:
+        if getattr(action, "type", None) is not ActionType.RON:
             if self._can_ron(seat, state.discard_tile, state.discarder, is_chankan=chankan):
                 p.temporary_furiten = True
+                p.riichi_furiten |= p.riichi
         state.pending_responders.remove(seat)
         if state.pending_responders:
             state.turn = state.pending_responders[0]

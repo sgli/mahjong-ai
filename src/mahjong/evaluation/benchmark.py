@@ -15,7 +15,13 @@ from .selfplay import GameResult, run_game, run_round
 
 log = logging.getLogger("evaluation.benchmark")
 
-RULES_VERSION = "tenhou-v1"
+from ..environment import ENVIRONMENT_VERSION
+RULES_VERSION = ENVIRONMENT_VERSION
+
+
+def _validate_results(results):
+    from .validation import validate_game_rows
+    validate_game_rows([{"seed": r.seed, "completed": r.completed, "error": r.error, "final_ranks": r.final_ranks, "illegal_actions": r.illegal_actions} for r in results])
 
 
 def _aggregate(ranks: list[int], stats: list[dict], scores: list[int]) -> dict:
@@ -43,6 +49,7 @@ def _aggregate(ranks: list[int], stats: list[dict], scores: list[int]) -> dict:
 
 def compute_metrics(results: list[GameResult], seat: int) -> dict:
     """Compute the 8 benchmark metrics for one (fixed) seat across games."""
+    _validate_results(results)
     ranks = [r.final_ranks[seat] for r in results]
     stats = [r.stats[seat] for r in results]
     scores = [r.final_scores[seat] for r in results]
@@ -51,6 +58,7 @@ def compute_metrics(results: list[GameResult], seat: int) -> dict:
 
 def compute_rotated_metrics(results: list[GameResult], seats: list[int]) -> dict:
     """Compute candidate metrics when the candidate seat rotates per game."""
+    _validate_results(results)
     ranks = [r.final_ranks[seats[g]] for g, r in enumerate(results)]
     stats = [r.stats[seats[g]] for g, r in enumerate(results)]
     scores = [r.final_scores[seats[g]] for g, r in enumerate(results)]
@@ -59,6 +67,7 @@ def compute_rotated_metrics(results: list[GameResult], seats: list[int]) -> dict
 
 def compute_opponents_metrics(results: list[GameResult], candidate_seats: list[int]) -> dict:
     """Aggregate the 3 opponent seats (all non-candidate seats) across games (§19)."""
+    _validate_results(results)
     ranks, stats, scores = [], [], []
     for g, r in enumerate(results):
         for seat in range(4):

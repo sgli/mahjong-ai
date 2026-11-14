@@ -26,7 +26,8 @@ class Player:
     discards: list[str] = field(default_factory=list)
     riichi: bool = False
     ippatsu: bool = False
-    temporary_furiten: bool = False  # 临时振听：立直见逃后直到下次摸牌前不可荣和
+    temporary_furiten: bool = False  # passing ron lasts until own next draw/discard
+    riichi_furiten: bool = False  # passing a ron after riichi lasts until round end
     discard_called: bool = False  # 该玩家舍牌是否被他人 吃/碰/大明杠（用于流局满贯）
     score: int = 25000
     last_drawn: str | None = None  # the tile just drawn (for tsumogiri / riichi discard)

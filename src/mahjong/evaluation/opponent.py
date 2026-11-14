@@ -19,7 +19,10 @@ from ..decision.action import Action, ActionType
 from ..features import ACTION_SPACE_SIZE, FEATURE_DIM
 from ..features.action_space import action_to_id, legal_mask
 from ..features.encoder import ObservationEncoder
-from ..model.policy import MLPPolicy, remap_bc_state_dict
+from ..features.encoder_v2 import FEATURE_DIM_V2, ObservationEncoderV2
+from ..features.encoder_v3 import FEATURE_DIM_V3, ObservationEncoderV3
+from ..features.action_space_v2 import ACTION_SPACE_SIZE_V2, action_to_id_v2, legal_mask_v2
+from ..model.policy import MLPPolicy, build_policy_model, remap_bc_state_dict
 from ..rules.tiles import HONORS, normalize
 from ..training.checkpoint import load_checkpoint
 
@@ -63,29 +66,70 @@ def load_policy(
     - 否则走既有 BC 路径（``load_checkpoint`` + ``remap_bc_state_dict``，保持不变）。
     """
     path = Path(checkpoint)
-    encoder = ObservationEncoder()
-
     if checkpoint_type == "ppo" or (checkpoint_type is None and _is_ppo_checkpoint_file(path)):
         from ..training.ppo_checkpoint import load_ppo_checkpoint
 
         ckpt = load_ppo_checkpoint(path, map_location="cpu")
         state = ckpt.get("model_state_dict") or {}
         hidden = tuple((ckpt.get("config") or {}).get("model", {}).get("hidden_sizes", [128, 128]))
-        model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden)
-        model.load_state_dict(state, strict=False)
+        config = ckpt.get("config") or {}
+        encoder, feat_dim, action_size = _schema_components(config)
+        model = build_policy_model(
+            config.get("feature_version", "feature-v1"), feat_dim, action_size, hidden,
+            model_config=config.get("model") or {},
+            value_separate_trunk=bool(config.get("model", {}).get("value_separate_trunk", False)),
+        )
+        model.load_state_dict(state, strict=config.get("feature_version") == "feature-v3")
         model.to(device)
         model.eval()
+        model.action_schema_version = config.get("action_schema_version", "action-v1")
+        model.allow_kyuushu = bool(config.get("allow_kyuushu", False))
         return encoder, model
 
-    # BC 路径（保持不变）
-    checkpoint_dir = path.parent if path.is_file() else path
-    ckpt = load_checkpoint(checkpoint_dir)
-    hidden = tuple(ckpt.get("config", {}).get("model", {}).get("hidden_sizes", [128, 128]))
-    model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, hidden)
-    model.load_state_dict(remap_bc_state_dict(ckpt["state_dict"]), strict=False)
+    # BC 路径：a file path is authoritative; a directory resolves best.pt
+    # first, then the legacy model.pt format.  Previously a supplied best.pt
+    # path was ignored and its parent/model.pt was loaded instead.
+    if path.is_file():
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    else:
+        best_file = path / "best.pt"
+        model_file = path / "model.pt"
+        if best_file.is_file():
+            ckpt = torch.load(best_file, map_location="cpu", weights_only=False)
+        elif model_file.is_file():
+            ckpt = load_checkpoint(path)
+        else:
+            raise FileNotFoundError(f"no BC checkpoint found at {path} (expected best.pt or model.pt)")
+    config = ckpt.get("config") or {}
+    hidden = tuple(config.get("model", {}).get("hidden_sizes", [128, 128]))
+    encoder, feat_dim, action_size = _schema_components(config)
+    model = build_policy_model(
+        config.get("feature_version", "feature-v1"), feat_dim, action_size, hidden,
+        model_config=config.get("model") or {},
+    )
+    state = ckpt.get("state_dict")
+    if state is None:
+        raise ValueError(f"BC checkpoint has no state_dict: {path}")
+    model.load_state_dict(
+        remap_bc_state_dict(state), strict=config.get("feature_version") == "feature-v3"
+    )
     model.to(device)
     model.eval()
+    model.action_schema_version = config.get("action_schema_version", "action-v1")
+    model.allow_kyuushu = bool(config.get("allow_kyuushu", False))
     return encoder, model
+
+
+def _schema_components(config: dict):
+    feature_version = config.get("feature_version", "feature-v1")
+    action_version = config.get("action_schema_version", "action-v1")
+    if feature_version == "feature-v2" and action_version == "action-v2":
+        return ObservationEncoderV2(), FEATURE_DIM_V2, ACTION_SPACE_SIZE_V2
+    if feature_version == "feature-v3" and action_version == "action-v2":
+        return ObservationEncoderV3(), FEATURE_DIM_V3, ACTION_SPACE_SIZE_V2
+    if feature_version == "feature-v1" and action_version == "action-v1":
+        return ObservationEncoder(), FEATURE_DIM, ACTION_SPACE_SIZE
+    raise ValueError(f"unsupported checkpoint schema: {feature_version}/{action_version}")
 
 
 class RandomOpponent(Opponent):
@@ -131,11 +175,20 @@ class PolicyOpponent(Opponent):
         self.encoder, self.model = load_policy(checkpoint, self.device, checkpoint_type=checkpoint_type)
 
     def decide(self, observation, legal_actions: list, rng: random.Random):
-        actions = [a for a in legal_actions if isinstance(a, Action)]
+        actions = [
+            a for a in legal_actions
+            if isinstance(a, Action)
+            and (a.type is not ActionType.KYUUSHU_KYUHAI or self.model.allow_kyuushu)
+        ]
         if not actions:
-            return legal_actions[0]  # e.g. the special kyuushu_kyuuhai string
+            return legal_actions[0]
         features = self.encoder.encode(observation).to(self.device).unsqueeze(0)
-        mask = legal_mask(actions).to(self.device).unsqueeze(0)
+        if self.model.action_schema_version == "action-v2":
+            mask = legal_mask_v2(actions, allow_kyuushu=self.model.allow_kyuushu).to(self.device).unsqueeze(0)
+            to_id = action_to_id_v2
+        else:
+            mask = legal_mask(actions).to(self.device).unsqueeze(0)
+            to_id = action_to_id
         with torch.no_grad():
             out = self.model(features, mask)
             if self.mode == "greedy":
@@ -146,7 +199,7 @@ class PolicyOpponent(Opponent):
                 generator = torch.Generator(device=probs.device)
                 generator.manual_seed(rng.randrange(1 << 31))
                 action_id = int(torch.multinomial(probs, 1, generator=generator).squeeze(-1).item())
-        return next(a for a in actions if action_to_id(a) == action_id)
+        return next(a for a in actions if to_id(a) == action_id)
 
 
 class RuleOpponent(Opponent):
@@ -160,7 +213,7 @@ class RuleOpponent(Opponent):
       5. DISCARD → discard the least useful tile (isolated terminal/honour first).
     """
 
-    def __init__(self, opponent_id: str = "rule", model_version: str = "rule-v1"):
+    def __init__(self, opponent_id: str = "rule", model_version: str = "rule-v2-win-first"):
         super().__init__(opponent_id=opponent_id, type="rule", model_version=model_version)
 
     @staticmethod
@@ -181,6 +234,15 @@ class RuleOpponent(Opponent):
         actions = [a for a in legal_actions if isinstance(a, Action)]
         if not actions:
             return legal_actions[0]
+
+        if self.model_version != "rule-v1":
+            for a in actions:
+                if a.type in (ActionType.TSUMO, ActionType.RON):
+                    return a
+        # Optional abort only after accepting any legal win.
+        for a in actions:
+            if a.type is ActionType.KYUUSHU_KYUHAI:
+                return a
 
         for a in actions:
             if a.type in (ActionType.TSUMO, ActionType.RON):

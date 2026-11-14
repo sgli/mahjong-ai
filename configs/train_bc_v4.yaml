@@ -1,0 +1,38 @@
+# BC-v4: feature-v3 ordered-river sequence encoder, trained from scratch.
+dataset_dir: "data/processed/decision-v3"
+checkpoint_dir: "experiments/bc_v4/checkpoints"
+
+dataset_version: "decision-v3"
+dataset_transform: "decision-v3-contextual-to-action-v2-feature-v3-river-sequence"
+feature_version: "feature-v3"
+action_schema_version: "action-v2"
+environment_version: "tenhou-v3-ron-context"
+model_version: "bc-v4"
+allow_kyuushu: false
+data_audit_path: "experiments/bc_v3/reference/decision_v3_full_audit.json"
+
+model:
+  hidden_sizes: [256, 256]
+  tile_embedding_dim: 16
+  river_hidden_size: 64
+  river_num_layers: 1
+
+training:
+  batch_size: 2048
+  epochs: 5
+  lr: 0.001
+  seed: 42
+  log_interval_steps: 1000
+  metric_interval_steps: 1000
+  device: "auto"
+  use_amp: true
+  pin_memory: true
+  num_workers: 16
+  prefetch_factor: 4
+  data_worker_threads: 1
+  shuffle_seed: 42
+  limit_train_shards: 0
+
+validation:
+  mode: "sampled"
+  samples: 5000000

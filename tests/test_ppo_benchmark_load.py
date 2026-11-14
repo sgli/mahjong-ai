@@ -52,3 +52,21 @@ def test_load_policy_bc_regression():
     with torch.no_grad():
         out = model(feats.unsqueeze(0), mask.unsqueeze(0))
     assert out.logits.shape == (1, ACTION_SPACE_SIZE)
+
+
+@pytest.mark.skipif(not Path("experiments/bc_v2.1/checkpoints/best.pt").exists(), reason="no BC-v2.1 best checkpoint")
+def test_bc_best_file_and_directory_resolve_to_same_weights():
+    directory = Path("experiments/bc_v2.1/checkpoints")
+    encoder_file, model_file = load_policy(directory / "best.pt", "cpu")
+    encoder_dir, model_dir = load_policy(directory, "cpu")
+    env = MahjongEnv(seed=17)
+    env.reset()
+    obs = env.observation(env.state.turn)
+    legal = [a for a in env.legal_actions(env.state.turn) if isinstance(a, Action)]
+    features_file = encoder_file.encode(obs)
+    features_dir = encoder_dir.encode(obs)
+    mask = legal_mask(legal)
+    with torch.no_grad():
+        logits_file = model_file(features_file.unsqueeze(0), mask.unsqueeze(0)).logits
+        logits_dir = model_dir(features_dir.unsqueeze(0), mask.unsqueeze(0)).logits
+    assert torch.equal(logits_file, logits_dir)

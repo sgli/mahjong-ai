@@ -184,5 +184,9 @@ def legal_mask(legal_actions) -> "torch.Tensor":
 
     mask = torch.zeros(ACTION_SPACE_SIZE, dtype=torch.bool)
     for action in legal_actions:
+        # Legacy feature-v1 checkpoints have no abortive-draw logit. Keep this
+        # typed action out of their mask; action-v2 handles it explicitly.
+        if action.type is ActionType.KYUUSHU_KYUHAI:
+            continue
         mask[action_to_id(action)] = True
     return mask

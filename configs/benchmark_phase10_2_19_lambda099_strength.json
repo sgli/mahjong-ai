@@ -1,0 +1,14 @@
+{
+  "candidate_checkpoint": "experiments/ppo_v4_rank_lambda099_audit/seed46_100k/best.pt",
+  "mirror_checkpoint": "experiments/bc_v4/checkpoints_20w/best.pt",
+  "opponent_checkpoint": "experiments/bc_v4/checkpoints_20w/best.pt",
+  "num_workers": 16,
+  "bootstrap_replicates": 10000,
+  "mirror_sanity_mode": "normal99-v2",
+  "games_per_arm": 10000,
+  "seed": 1150000,
+  "bootstrap_seed": 10401,
+  "candidate_version": "ppo-v4-pure-rank-lambda099-seed46",
+  "stage_id": "phase10.2.19-pure-rank-lambda099-strength",
+  "out": "experiments/ppo_v4_rank_lambda099_audit/strength_10000_seed1150000_v1"
+}

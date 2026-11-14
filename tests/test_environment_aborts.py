@@ -30,6 +30,25 @@ def test_four_wind_abort_detection():
     assert env._check_four_wind_abort() is False
 
 
+def test_kyuushu_is_a_typed_legal_action_and_executes():
+    env = MahjongEnv(seed=17)
+    env.reset()
+    env.state.turn = 1
+    env.state.phase = PHASE_DISCARD
+    player = env.state.players[1]
+    player.hand = ["1m", "9m", "1p", "9p", "1s", "9s", "E", "S", "W", "2m", "3m", "4m", "5m"]
+    player.drawn_this_turn = True
+    env.state.first_draw_done[1] = False
+    legal = env.legal_actions(1)
+    action = Action(ActionType.KYUUSHU_KYUHAI)
+    assert action in legal
+    _, done = env.step(action)
+    assert not done
+    assert env.state.phase == PHASE_DISCARD
+    assert env.state.kyoku == 1
+    assert env.state.honba == 1
+
+
 def test_four_wind_abort_ends_kyoku():
     env = MahjongEnv(seed=1)
     env.reset()

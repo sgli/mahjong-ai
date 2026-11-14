@@ -1,0 +1,79 @@
+checkpoint_dir: experiments/ppo_v4_rank_lambda099_audit/seed46_100k
+dataset_version: decision-v3
+feature_version: feature-v3
+action_schema_version: action-v2
+environment_version: tenhou-v3-ron-context
+reward_version: reward-v1-pure-placement-v1
+model_version: ppo-v4-pure-rank-lambda099-audit-seed46-v1
+training_stage: phase10.2.19-pure-rank-lambda099-seed46
+checkpoint_selection: latest_epoch
+allow_kyuushu: false
+bc_checkpoint: experiments/bc_v4/checkpoints_20w/best.pt
+eval_games: 5
+opponent_checkpoints:
+  bc-v3: experiments/bc_v3/checkpoints/best.pt
+  bc-v4: experiments/bc_v4/checkpoints_20w/best.pt
+model:
+  hidden_sizes:
+  - 256
+  - 256
+  tile_embedding_dim: 16
+  river_hidden_size: 64
+  river_num_layers: 1
+  value_separate_trunk: false
+  value_separate_encoder: false
+  value_public_coefficients:
+  - -0.48365194132121986
+  - 0.29724779867654344
+  - 0.30255868232583
+  - -0.11211752756258836
+  - 0.24136405496753582
+  - -0.12924652740495748
+  - 0.0
+  - -0.11355146483755431
+  - -0.011914362625438761
+  - 0.010500729862581363
+  - 0.11496509760041293
+  - 0.8134855971621119
+  - -0.2813149930476512
+  - 0.04552873464148199
+  - 0.00031297813320393724
+  - -0.17446343404230752
+  - 0.12862172126762333
+  policy_temperature: 1.0
+opponent_pool_version: fixed-bc-v4-greedy-v1
+opponent_pool_config:
+  bc-v4: 1.0
+training:
+  epochs: 10
+  steps_per_epoch: 10000
+  step_budget_unit: learner_transitions
+  seed: 46
+  env_seed: 660000
+  opponent_pool_seed: 46
+  num_envs: 1
+  device: cuda
+  lr: 5.0e-05
+  batch_size: 512
+  update_epochs: 4
+  gamma: 1.0
+  lam: 0.99
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.0
+  max_episode_steps: 10000
+  bc_anchor_beta: 0.1
+  warmup_steps: 0
+  rollout_version: rollout-v1
+  rng_version: rng-v1
+  opponent_mode: greedy
+  opponent_temperature: 1.0
+  diagnose: true
+  attribution: false
+  reward_clip: 0.0
+  reward_score_scale: 0.0
+  warmup_epochs: 0
+  decision_only: true
+  max_grad_norm: 0.5
+  target_kl: 0.01
+  call_anchor_beta: 1.0

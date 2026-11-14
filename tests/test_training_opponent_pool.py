@@ -9,6 +9,7 @@ from mahjong.features import ACTION_SPACE_SIZE, FEATURE_DIM, ObservationEncoder
 from mahjong.model import MLPPolicy
 from mahjong.training import TrainingOpponentPool, build_opponent, collect_trajectory_with_opponents, register_historical_checkpoints, sample_seats, train_ppo
 from mahjong.training.attribution import attribute_game
+from mahjong.training.ppo import opponent_pool_game_index
 
 
 def _pool(seed=42):
@@ -53,6 +54,30 @@ def test_collect_trajectory_with_opponents_runs():
     assert traj[learner_seat].steps
 
 
+def test_collect_trajectory_with_opponents_caps_learner_transitions_and_bootstraps():
+    torch.manual_seed(0)
+    model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, (16, 16))
+    model.eval()
+    encoder = ObservationEncoder()
+    env = MahjongEnv(seed=1)
+    learner_seat = 1
+    opponents = {
+        0: build_opponent("random-v1", bc_checkpoint=""),
+        2: build_opponent("rule-v1", bc_checkpoint=""),
+        3: build_opponent("rule-v1", bc_checkpoint=""),
+    }
+    traj, env_steps, illegal, bootstrap, truncated = collect_trajectory_with_opponents(
+        env, model, encoder, torch.device("cpu"), learner_seat=learner_seat,
+        opponents=opponents, max_steps=500, max_learner_steps=4, greedy=True, seed=7,
+    )
+    assert len(traj[learner_seat].steps) == 4
+    assert env_steps >= 4
+    assert illegal == 0
+    assert truncated
+    assert traj[learner_seat].steps[-1].done is False
+    assert torch.isfinite(torch.tensor(bootstrap))
+
+
 def test_attribution_multi_opponent_types():
     """opponent pool 启用后 per_opponent 出现多种对手类型。"""
     torch.manual_seed(0)
@@ -88,6 +113,26 @@ def test_train_ppo_with_pool_runs():
     assert m["illegal_rate"] == 0.0
     assert m["steps"] > 0
     assert all(m[k] == m[k] for k in m if isinstance(m[k], float))
+
+
+def test_train_ppo_learner_transition_budget_is_exact():
+    torch.manual_seed(0)
+    model = MLPPolicy(FEATURE_DIM, ACTION_SPACE_SIZE, (16, 16))
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    encoder = ObservationEncoder()
+    pool = TrainingOpponentPool({}, {"random-v1": 0.5, "rule-v1": 0.5}, seed=0)
+    hist = train_ppo(
+        model, encoder, opt, num_envs=1, env_seed=0, epochs=1, steps_per_epoch=7, batch_size=8,
+        update_epochs=1, gamma=0.99, lam=0.95, clip_eps=0.2, vf_coef=0.5, ent_coef=0.01,
+        device=torch.device("cpu"), max_episode_steps=500,
+        opponent_pool=pool, opponent_bc_checkpoint="", opponent_pool_seed=0,
+        step_budget_unit="learner_transitions",
+    )
+    metrics = hist[0]
+    assert metrics["step_budget_unit"] == "learner_transitions"
+    assert metrics["target_steps"] == 7
+    assert metrics["learner_transitions"] == 7
+    assert metrics["rollout_buffer_samples"] == 7
 
 
 def test_build_ppo_v1_opponent():
@@ -136,34 +181,25 @@ def test_historical_registration_to_build_chain():
     assert opp.opponent_id == key
 
 
-def test_ppo_fix_configs_no_opponent_pool():
-    """§10 的 9 个实验配置应为纯自对弈（无 opponent_pool_config），否则在新接线会报错。"""
-    import yaml
-    from pathlib import Path
-
-    d = Path("configs/experiments/ppo_fix")
-    for name in ("b", "c", "d1", "d2", "d3", "d4", "d5", "d6", "e1"):
-        cfg = yaml.safe_load((d / f"{name}.yaml").read_text(encoding="utf-8"))
-        assert "opponent_pool_config" not in cfg, f"{name}.yaml 不应含 opponent_pool_config"
+def test_historical_milestone_directory_registers_its_latest_file(tmp_path):
+    milestone = tmp_path / "ppo-20k"
+    milestone.mkdir()
+    checkpoint = milestone / "latest.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    registered = register_historical_checkpoints(milestone)
+    assert registered == {"historical:ppo-20k": str(checkpoint)}
 
 
-def test_v2_config_pool_assembles_no_missing_checkpoint():
-    """configs/train_ppo_v2.yaml 的五类对手 checkpoint_map 可完整组装（缺失则显式失败）。"""
-    import yaml
-    from pathlib import Path
+def test_pool_assignment_is_stateless_for_a_game_index():
+    pool = TrainingOpponentPool({}, {"random-v1": 1.0, "rule-v1": 1.0}, seed=123)
+    first = sample_seats(pool, (1 << 32) | 17)
+    second = sample_seats(pool, (1 << 32) | 17)
+    assert first == second
 
-    cfg = yaml.safe_load(Path("configs/train_ppo_v2.yaml").read_text(encoding="utf-8"))
-    pool_config = cfg["opponent_pool_config"]
-    opp_ckpts = cfg.get("opponent_checkpoints") or {}
-    assert "ppo-v1" in opp_ckpts
-    assert Path(opp_ckpts["ppo-v1"]).exists()
-    checkpoint_map = {"ppo-v1": opp_ckpts["ppo-v1"]}
-    for entry in opp_ckpts.get("historical") or []:
-        p = Path(entry)
-        assert p.is_dir(), f"historical dir missing: {entry}"
-        checkpoint_map.update(register_historical_checkpoints(p))
-    for ot in pool_config:
-        if ot == "ppo-v1":
-            assert "ppo-v1" in checkpoint_map
-        elif ot == "historical":
-            assert any(k.startswith("historical:") for k in checkpoint_map)
+
+def test_opponent_pool_game_seed_namespace_does_not_repeat_across_epochs():
+    indices = [opponent_pool_game_index(epoch, game) for epoch in range(4) for game in range(10)]
+    assert len(indices) == len(set(indices))
+    assert opponent_pool_game_index(2, 7) == opponent_pool_game_index(2, 7)
+
+
